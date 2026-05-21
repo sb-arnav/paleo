@@ -223,6 +223,62 @@ class TestPolicyOutcome(unittest.TestCase):
             self.assertEqual(succeeded[0]["tool_name"], "mcp__claude_ai_Linear__list_projects")
 
 
+class TestPolicySince(unittest.TestCase):
+    def test_since_drops_pre_cutoff_hits(self):
+        """--since filters out hits older than the cutoff but keeps newer ones."""
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            session = root / "session.jsonl"
+            lines = [
+                # OLD hit — should be dropped by --since 2026-05-21
+                {"message": {"content": [{
+                    "type": "tool_use", "id": "tu_old",
+                    "name": "mcp__claude_ai_Linear__list_projects", "input": {},
+                }]}, "timestamp": "2026-05-12T14:53:00Z"},
+                {"message": {"content": [{
+                    "type": "tool_result", "tool_use_id": "tu_old", "content": "ok",
+                }]}},
+                # NEW hit — should be kept
+                {"message": {"content": [{
+                    "type": "tool_use", "id": "tu_new",
+                    "name": "mcp__claude_ai_Tavily__tavily_search", "input": {},
+                }]}, "timestamp": "2026-05-21T11:34:00Z"},
+                {"message": {"content": [{
+                    "type": "tool_result", "tool_use_id": "tu_new",
+                    "is_error": True, "content": "BLOCKED",
+                }]}},
+            ]
+            session.write_text("\n".join(json.dumps(L) for L in lines) + "\n")
+
+            policies = [{
+                "id": "p", "match": {"tool_prefix": "mcp__claude_ai_"},
+                "severity": "block", "reason": "test",
+            }]
+            since_dt = paleo._parse_since("2026-05-21")
+            hits, _ = paleo.collect_policy_hits(root, None, policies, since_dt=since_dt)
+            self.assertEqual(len(hits["p"]), 1)
+            self.assertEqual(hits["p"][0]["tool_name"], "mcp__claude_ai_Tavily__tavily_search")
+
+    def test_parse_since_accepts_date_and_iso(self):
+        self.assertIsNotNone(paleo._parse_since("2026-05-21"))
+        self.assertIsNotNone(paleo._parse_since("2026-05-21T11:04:00Z"))
+        self.assertIsNotNone(paleo._parse_since("2026-05-21T11:04:00+00:00"))
+        self.assertIsNone(paleo._parse_since(None))
+        self.assertIsNone(paleo._parse_since(""))
+
+    def test_parse_since_rejects_garbage(self):
+        with self.assertRaises(ValueError):
+            paleo._parse_since("not-a-timestamp")
+        with self.assertRaises(ValueError):
+            paleo._parse_since("2026/05/21")
+
+    def test_hits_without_timestamp_are_kept(self):
+        """Defensive: a hit with no timestamp shouldn't be silently dropped."""
+        since_dt = paleo._parse_since("2026-05-21")
+        self.assertTrue(paleo._hit_after({"timestamp": None}, since_dt))
+        self.assertTrue(paleo._hit_after({}, since_dt))
+
+
 class TestHealthSummary(unittest.TestCase):
     def test_crons_summary_row_shape(self):
         rows = paleo._crons_summary()

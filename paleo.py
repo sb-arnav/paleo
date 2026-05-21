@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import datetime
 import json
 import pathlib
 import re
@@ -410,13 +411,56 @@ def _compile_policy(p: dict) -> dict:
     return {**p, "_match": fn}
 
 
+def _parse_since(raw: str | None) -> datetime.datetime | None:
+    """Parse --since timestamp. Accepts YYYY-MM-DD or full ISO 8601 (Z accepted).
+    Returns a tz-aware UTC datetime, or None if raw is falsy.
+    Raises ValueError with a friendly message on bad input.
+    """
+    if not raw:
+        return None
+    s = raw.strip()
+    if len(s) == 10 and s.count("-") == 2:
+        s = s + "T00:00:00+00:00"
+    elif s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.datetime.fromisoformat(s)
+    except ValueError as e:
+        raise ValueError(
+            f"--since {raw!r} is not a valid ISO timestamp "
+            f"(try YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ)"
+        ) from e
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.astimezone(datetime.timezone.utc)
+
+
+def _hit_after(hit: dict, since_dt: datetime.datetime | None) -> bool:
+    """True if hit timestamp is at-or-after since_dt (or no cutoff)."""
+    if since_dt is None:
+        return True
+    ts = hit.get("timestamp")
+    if not ts:
+        return True  # unknown timestamp — keep it, don't silently drop
+    s = ts[:-1] + "+00:00" if isinstance(ts, str) and ts.endswith("Z") else ts
+    try:
+        hit_dt = datetime.datetime.fromisoformat(s)
+    except (ValueError, TypeError):
+        return True
+    if hit_dt.tzinfo is None:
+        hit_dt = hit_dt.replace(tzinfo=datetime.timezone.utc)
+    return hit_dt >= since_dt
+
+
 def collect_policy_hits(
     logs_root: pathlib.Path,
     since_seconds: float | None,
     policies: list[dict],
+    since_dt: datetime.datetime | None = None,
 ) -> tuple[dict[str, list[dict]], Usage]:
     """Two-pass: gather tool_use blocks matching policy, then cross-reference
     tool_result.is_error so we can label each hit as "blocked" or "succeeded".
+    If since_dt is set, hits older than that timestamp are dropped after collection.
     """
     compiled = [_compile_policy(p) for p in policies]
     cutoff = time.time() - since_seconds if since_seconds else None
@@ -484,14 +528,20 @@ def collect_policy_hits(
         except OSError:
             continue
         for h in file_hits:
-            hits[h["policy_id"]].append(h)
+            if _hit_after(h, since_dt):
+                hits[h["policy_id"]].append(h)
     return hits, usage
 
 
 def cmd_policy(args: argparse.Namespace, _usage: Usage) -> int:
     logs_root = pathlib.Path(args.logs).expanduser()
     since = args.days * 86400 if args.days else None
-    hits, usage = collect_policy_hits(logs_root, since, DEFAULT_POLICIES)
+    try:
+        since_dt = _parse_since(getattr(args, "since", None))
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    hits, usage = collect_policy_hits(logs_root, since, DEFAULT_POLICIES, since_dt=since_dt)
 
     if args.json:
         out = {
@@ -522,6 +572,9 @@ def cmd_policy(args: argparse.Namespace, _usage: Usage) -> int:
         return 1 if any_block_succeeded else 0
 
     _print_header(usage, args.days)
+    if since_dt is not None:
+        print(f"   policy cutoff: hits before {since_dt.isoformat()} ignored")
+        print()
 
     any_block_succeeded = False
     total_attempted = 0
@@ -1027,7 +1080,12 @@ def cmd_health(args: argparse.Namespace, usage: Usage) -> int:
     )
 
     # policy
-    policy_hits, _ = collect_policy_hits(logs_root, since, DEFAULT_POLICIES)
+    try:
+        since_dt = _parse_since(getattr(args, "since", None))
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    policy_hits, _ = collect_policy_hits(logs_root, since, DEFAULT_POLICIES, since_dt=since_dt)
     policy_attempted = sum(len(items) for items in policy_hits.values())
     policy_succeeded = sum(
         sum(1 for h in items if h["blocked"] is False) for items in policy_hits.values()
@@ -1228,6 +1286,16 @@ def build_parser() -> argparse.ArgumentParser:
                 type=float,
                 default=None,
                 help="If set, flag paths whose mtime is older than N days as STALE.",
+            )
+        if name in ("policy", "health"):
+            sp.add_argument(
+                "--since",
+                default=None,
+                help=(
+                    "Ignore policy hits before this timestamp. Accepts YYYY-MM-DD "
+                    "or full ISO 8601 (e.g. 2026-05-21T11:04:00Z). Use this to "
+                    "exclude attempts made before a hard-block hook was installed."
+                ),
             )
 
     return p

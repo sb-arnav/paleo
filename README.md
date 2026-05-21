@@ -117,6 +117,16 @@ Exit codes:
 - `0` — no attempts, OR all matching attempts were blocked by your hooks.
 - `1` — at least one BLOCK-severity attempt actually succeeded.
 
+Excluding pre-hook history with `--since`:
+
+```bash
+paleo policy --since 2026-05-21                       # whole-day cutoff (00:00 UTC)
+paleo policy --since 2026-05-21T11:04:00Z             # precise hook install time
+paleo health --since 2026-05-21T11:04:00Z             # same flag works on health
+```
+
+Why this matters: when you install a hard-block hook part-way through your JSONL history, every pre-install attempt remains in the log forever. Without `--since`, the dashboard yells about historical violations until they age out of the `--days` window. With it, you anchor the policy to "from this moment on" — succeeded violations now mean "the hook is actually broken," not "you've had this hook for less than 30 days." Use `stat -c %y ~/.claude/hooks/your-hook.sh | cut -d. -f1` to get the exact install timestamp.
+
 Composes with `git commit` gates, CI, or a `Stop` hook.
 
 ## Crons (silent failure detection)

@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.8.2 — 2026-05-21
+
+- New: `--since TIMESTAMP` on `paleo policy` and `paleo health`. Drops policy hits older than the given moment, so hard-block hooks installed mid-history don't poison the dashboard with pre-install attempts. Accepts `YYYY-MM-DD` (00:00 UTC) or full ISO 8601 (e.g. `2026-05-21T11:04:00Z`). Common pairing: `paleo health --since "$(stat -c %y ~/.claude/hooks/<hook>.sh | cut -d. -f1)"`.
+- On the development workspace, a hard-block hook installed today turned policy from "9 attempts, 5 succeeded ✗" into "1 attempt, 0 succeeded ✓" once the cutoff was applied — confirming the hook is working without 30 days of false-alarm noise.
+- 4 new tests (30 total): cutoff filters pre-cutoff hits, ISO/date parsing, garbage rejection, and timestamp-less hits stay kept (defensive).
+
 ## v0.8.1 — 2026-05-21
 
 - `paleo claims` now also recognizes double-quoted paths (`--file="/x/y z/foo"`) as path claims, allowing spaces inside the quotes — same as backtick-wrapped. Catches paths inside shell command examples in memory notes (e.g. `gradle --signing.store.file="/path with space/key.jks"`). The bare-path regex's negative lookbehind now also skips the inside of `"..."` slices so we don't double-count partial matches.
