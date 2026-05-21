@@ -57,6 +57,13 @@ class TestExtractPaths(unittest.TestCase):
         out = paleo._extract_paths(text)
         self.assertIn("/home/alice/My Project/release/signing.keystore", out)
 
+    def test_double_quoted_paths_can_contain_spaces(self):
+        text = '--signing.store.file="/home/alice/My Project/release/signing.keystore" \\'
+        out = paleo._extract_paths(text)
+        self.assertIn("/home/alice/My Project/release/signing.keystore", out)
+        # bare-path regex must not have captured the truncated prefix
+        self.assertNotIn("/home/alice/My", out)
+
     def test_paths_with_plus_in_version(self):
         text = "JDK at `/home/alice/.jdk/jdk-17.0.13+11`"
         out = paleo._extract_paths(text)

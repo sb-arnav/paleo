@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.8.1 — 2026-05-21
+
+- `paleo claims` now also recognizes double-quoted paths (`--file="/x/y z/foo"`) as path claims, allowing spaces inside the quotes — same as backtick-wrapped. Catches paths inside shell command examples in memory notes (e.g. `gradle --signing.store.file="/path with space/key.jks"`). The bare-path regex's negative lookbehind now also skips the inside of `"..."` slices so we don't double-count partial matches.
+- New test for the quoted-path case (26 total).
+- On the development workspace: missing-path findings dropped further to 2 (from 8 at v0.6).
+
 ## v0.8 — 2026-05-21
 
 - New: `paleo health` — composes `dead`, `policy`, `claims`, `crons`, and `plugins` into a single one-screen summary. Exits non-zero when any constituent check would have exited non-zero. Intended for daily-digest cron use:

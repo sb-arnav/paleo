@@ -811,12 +811,14 @@ def cmd_crons(args: argparse.Namespace, _usage: Usage) -> int:
 # ----- claims: cross-check MEMORY.md paths against disk ----------------------
 
 
-# Path extraction has two shapes:
-#   1. Backtick-wrapped: `…/anything except backticks…` — allows spaces
-#   2. Bare:             ~ or /home/<user>/  followed by safe chars only
+# Path extraction has three shapes:
+#   1. Backtick-wrapped: `…/anything except backticks…`        — allows spaces
+#   2. Double-quoted:    "…/anything except dquote…"           — allows spaces
+#   3. Bare:             ~ or /home/<user>/  followed by safe chars only
 BACKTICK_PATH = re.compile(r"`(?P<path>(?:~|/home/[a-z0-9_-]+)[^`]+)`")
+DQUOTED_PATH = re.compile(r'"(?P<path>(?:~|/home/[a-z0-9_-]+)[^"]+)"')
 BARE_PATH = re.compile(
-    r"(?<![`A-Za-z0-9_/.])(?P<path>(?:~|/home/[a-z0-9_-]+)[/.A-Za-z0-9_+\-]+)"
+    r"(?<![`\"A-Za-z0-9_/.])(?P<path>(?:~|/home/[a-z0-9_-]+)[/.A-Za-z0-9_+\-]+)"
 )
 # Heuristic: paths containing placeholder tokens are templates, not real paths.
 PLACEHOLDER_TOKENS = ("<", ">", "${", "*", " X.X", "/X.X", "X.X/", "X.X.")
@@ -877,7 +879,12 @@ def _extract_paths(text: str) -> set[str]:
             p = m.group("path").rstrip()
             if len(p) >= PATH_MIN_LEN and not _looks_like_template(p):
                 found.add(p)
-        # Bare paths must not be inside a backtick-wrapped slice we already captured.
+        for m in DQUOTED_PATH.finditer(line):
+            p = m.group("path").rstrip()
+            if len(p) >= PATH_MIN_LEN and not _looks_like_template(p):
+                found.add(p)
+        # Bare paths must not start inside a quoted slice we already captured
+        # (the negative-lookbehind on the regex handles that).
         for m in BARE_PATH.finditer(line):
             p = m.group("path").rstrip(".,;:)")
             if len(p) >= PATH_MIN_LEN and not _looks_like_template(p):
