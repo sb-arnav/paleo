@@ -66,10 +66,11 @@ Requires Python 3.10+. Zero dependencies.
 |---|---|---|
 | `dead` | Installed skills/MCPs/subagents that were never invoked in window | never |
 | `policy` | Tool invocations matching hard-block rules | BLOCK attempt **succeeded** |
+| `hooks` | Stop hooks configured but never fired (silent breakage detection), plus orphan fires from removed hooks | any Stop hook never fired in window |
 | `claims` | Paths cited in MEMORY.md tree that no longer exist | any missing path |
 | `crons` | Cron jobs whose log file hasn't been touched recently | any stale or missing |
 | `plugins` | Plugin marketplaces + per-plugin metadata; flags third-party marketplaces | any third-party marketplace |
-| `health` | One-screen summary across `dead`, `policy`, `claims`, `crons`, `plugins` — designed for daily-digest cron use | any constituent check fails |
+| `health` | One-screen summary across `dead`, `policy`, `hooks`, `claims`, `crons`, `plugins` — designed for daily-digest cron use | any constituent check fails |
 | `top` | Top tools by raw invocation count | never |
 | `skills` | Per-skill usage table | never |
 | `mcps` | Per-MCP usage table (local + plugin + ghost connectors) | never |
@@ -129,6 +130,44 @@ Why this matters: when you install a hard-block hook part-way through your JSONL
 
 Composes with `git commit` gates, CI, or a `Stop` hook.
 
+## Hooks (silent breakage detection)
+
+`paleo hooks` enumerates every hook configured across `~/.claude/settings.json`, `~/.claude/settings.local.json`, and each enabled plugin's `hooks/hooks.json` (resolved via `installed_plugins.json`), then cross-references against JSONL `stop_hook_summary` records to determine which Stop hooks actually fired.
+
+```bash
+paleo hooks                 # exits 1 if any Stop hook never fired in window
+paleo --days 7 hooks        # tighter window for fast feedback
+paleo --json hooks          # pipe into jq
+```
+
+What you'll see:
+
+```
+paleo hooks · 33 configured · 4 firing · 0 never-fired · 29 config-only
+
+FIRING (Stop hooks)
+    387x  avg  292ms  ⚠ max 17000ms  last: 2026-05-21T13:16:11
+         bash ~/.claude/hooks/session-state-write.sh
+    ...
+
+CONFIG-ONLY (29 hooks on non-Stop events — fire status not observable from JSONL)
+  PreToolUse: 8
+  UserPromptSubmit: 7
+  ...
+
+ORPHAN FIRES (1 commands fired but not in any settings file —
+              uninstalled plugin or removed hook still referenced)
+    320x  bash "${CLAUDE_PROJECT_DIR}/.claude/hooks/uat-evidence-required.sh"
+```
+
+Three signals, each catches a distinct failure mode:
+
+- **NEVER-FIRED** — a Stop hook is configured in `settings.json` but no `stop_hook_summary` record references it in the window. Most likely cause: the script broke silently. Maps directly to anthropics/claude-code issues [#16047](https://github.com/anthropics/claude-code/issues/16047) ("Hooks stop executing after ~2.5 hours… no error messages, warnings, or indication of failure") and [#2891](https://github.com/anthropics/claude-code/issues/2891).
+- **ORPHAN FIRES** — a hook is still firing in your sessions but doesn't exist in any current config file. Usually means you uninstalled the plugin that registered it, but Claude Code is still running it from a stale cache. Catch-and-investigate.
+- **⚠ slow max-duration** — Stop hooks above 1s of `durationMs` are flagged inline. Slow Stop hooks block Claude's response cycle.
+
+**Why only Stop hooks?** Claude Code emits an explicit `hookInfos` array (per-hook command + duration) only on system records with `subtype=stop_hook_summary`. Fires of PreToolUse / PostToolUse / SessionStart / UserPromptSubmit / Notification / PostCompact are not recorded in JSONL. paleo lists them as `config-only` so you know what's registered, but cannot verify they fired.
+
 ## Crons (silent failure detection)
 
 `paleo crons` reads `crontab -l`, parses the schedule + log-redirect target (`>> /path/to/log`), and checks each log file's mtime against the expected fire interval (with a configurable slack). Catches the failure mode where cron silently stops without anything else noticing.
@@ -164,9 +203,10 @@ Trusted-owner list is hardcoded (`anthropics`); extend `TRUSTED_MARKETPLACES` in
 
 ## Roadmap
 
+- `paleo cost` — per-skill / per-MCP / per-project token attribution from `message.usage` (close the gap with [unclog](https://github.com/thomaschill/unclog)'s token-cost angle without copying its deletion UI).
+- Per-project breakdown — group every check by `cwd` / `gitBranch` so dead-skill findings aren't workspace-global noise.
 - Extend `paleo claims` to verify cron schedules embedded in prose ("runs daily at 07:00 IST" → check crontab too).
 - Load policies from `~/.claude/paleo-policy.json` instead of editing source.
-- Per-project breakdown (which project surfaced which dead skill?).
 - `--since-commit <sha>` to scope to recent activity instead of wall-clock days.
 
 ## License

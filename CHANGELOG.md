@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.9 — 2026-05-21
+
+- New: `paleo hooks` — enumerates every Claude Code hook configured across `~/.claude/settings.json`, `~/.claude/settings.local.json`, and each enabled plugin's `hooks/hooks.json` (resolved via `installed_plugins.json` `installPath`), then cross-references against JSONL `stop_hook_summary` records to determine which Stop hooks actually fired.
+
+  Three signals surfaced:
+  - **NEVER-FIRED** — Stop hook in config but no `stop_hook_summary` record in window. Maps to anthropics/claude-code issues #16047 ("Hooks stop executing after ~2.5 hours… no error messages, warnings, or indication of failure") and #2891.
+  - **ORPHAN FIRES** — hook still firing in sessions but no longer in any config file. Catches uninstalled-plugin-still-running and stale-cache cases.
+  - **slow max-duration** — Stop hooks above 1s `durationMs` flagged inline; they block Claude's response cycle.
+
+  Non-Stop event hooks (PreToolUse / PostToolUse / SessionStart / UserPromptSubmit / Notification / PostCompact) are listed as `config-only` because Claude Code does not emit fire records into JSONL for those event types.
+
+- `paleo health` now includes the `hooks` line and fails if any Stop hook is never-fired in window.
+
+- On the dev workspace's first run: 4 Stop hooks firing healthy (387/384/365/358 fires each over 30 days), 1 orphan fire surfaced (`uat-evidence-required.sh` — 320 historical fires, script no longer exists on disk anywhere), 29 hooks correctly classified as config-only.
+
+- 5 new tests (35 total): hooks-file parsing of nested settings shape, malformed-input tolerance, subtype filtering in fire collection, event classification.
+
 ## v0.8.2 — 2026-05-21
 
 - New: `--since TIMESTAMP` on `paleo policy` and `paleo health`. Drops policy hits older than the given moment, so hard-block hooks installed mid-history don't poison the dashboard with pre-install attempts. Accepts `YYYY-MM-DD` (00:00 UTC) or full ISO 8601 (e.g. `2026-05-21T11:04:00Z`). Common pairing: `paleo health --since "$(stat -c %y ~/.claude/hooks/<hook>.sh | cut -d. -f1)"`.

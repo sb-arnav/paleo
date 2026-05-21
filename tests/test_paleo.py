@@ -279,6 +279,105 @@ class TestPolicySince(unittest.TestCase):
         self.assertTrue(paleo._hit_after({}, since_dt))
 
 
+class TestHooksDiscovery(unittest.TestCase):
+    def _make_settings(self, root: pathlib.Path, hooks_dict: dict) -> None:
+        """Write a Claude-style settings.json with the given hooks block."""
+        (root / "settings.json").write_text(json.dumps({"hooks": hooks_dict}))
+
+    def test_read_hooks_file_handles_missing(self):
+        self.assertEqual(paleo._read_hooks_file(pathlib.Path("/no/such/file")), [])
+
+    def test_read_hooks_file_parses_nested_shape(self):
+        with tempfile.TemporaryDirectory() as td:
+            f = pathlib.Path(td) / "settings.json"
+            f.write_text(json.dumps({
+                "hooks": {
+                    "Stop": [{"matcher": "", "hooks": [
+                        {"type": "command", "command": "bash /tmp/a.sh"},
+                        {"type": "command", "command": "bash /tmp/b.sh"},
+                    ]}],
+                    "PreToolUse": [{"matcher": "Bash", "hooks": [
+                        {"type": "command", "command": "bash /tmp/c.sh"},
+                    ]}],
+                }
+            }))
+            out = paleo._read_hooks_file(f)
+            self.assertEqual(len(out), 3)
+            events = [h["event"] for h in out]
+            self.assertEqual(events.count("Stop"), 2)
+            self.assertEqual(events.count("PreToolUse"), 1)
+            pre = next(h for h in out if h["event"] == "PreToolUse")
+            self.assertEqual(pre["matcher"], "Bash")
+
+    def test_read_hooks_file_tolerates_malformed(self):
+        with tempfile.TemporaryDirectory() as td:
+            f = pathlib.Path(td) / "settings.json"
+            # Missing 'command' key, non-dict entries — should be skipped, not raised
+            f.write_text(json.dumps({
+                "hooks": {
+                    "Stop": [
+                        {"matcher": "", "hooks": [
+                            {"type": "command"},  # no command
+                            "not-a-dict",
+                            {"type": "command", "command": "bash /tmp/ok.sh"},
+                        ]},
+                        "not-a-dict",
+                    ]
+                }
+            }))
+            out = paleo._read_hooks_file(f)
+            self.assertEqual(len(out), 1)
+            self.assertEqual(out[0]["command"], "bash /tmp/ok.sh")
+
+
+class TestHookFires(unittest.TestCase):
+    def test_collect_hook_fires_only_stop_hook_summary(self):
+        """Only system records with subtype=stop_hook_summary contribute fires."""
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            session = root / "session.jsonl"
+            lines = [
+                # Stop hook summary — counted
+                {"type": "system", "subtype": "stop_hook_summary",
+                 "timestamp": "2026-05-21T12:00:00Z",
+                 "hookInfos": [
+                     {"command": "bash /tmp/a.sh", "durationMs": 100},
+                     {"command": "bash /tmp/b.sh", "durationMs": 200},
+                 ]},
+                # Another stop_hook_summary — accumulates
+                {"type": "system", "subtype": "stop_hook_summary",
+                 "timestamp": "2026-05-21T12:05:00Z",
+                 "hookInfos": [
+                     {"command": "bash /tmp/a.sh", "durationMs": 300},
+                 ]},
+                # Different subtype — IGNORED
+                {"type": "system", "subtype": "turn_duration",
+                 "hookInfos": [
+                     {"command": "bash /tmp/never-counted.sh", "durationMs": 999},
+                 ]},
+                # Non-system record with content blocks — IGNORED
+                {"type": "assistant", "message": {"content": [
+                    {"type": "tool_use", "name": "Bash"}
+                ]}},
+            ]
+            session.write_text("\n".join(json.dumps(L) for L in lines) + "\n")
+            fires = paleo.collect_hook_fires(root, None)
+            self.assertEqual(set(fires.keys()), {"bash /tmp/a.sh", "bash /tmp/b.sh"})
+            self.assertEqual(fires["bash /tmp/a.sh"]["fires"], 2)
+            self.assertEqual(fires["bash /tmp/a.sh"]["max_ms"], 300)
+            self.assertEqual(fires["bash /tmp/a.sh"]["total_ms"], 400)
+            self.assertEqual(fires["bash /tmp/a.sh"]["last_ts"], "2026-05-21T12:05:00Z")
+            self.assertEqual(fires["bash /tmp/b.sh"]["fires"], 1)
+
+    def test_event_classification(self):
+        """Stop is observable; other events are config-only."""
+        self.assertIn("Stop", paleo.HOOK_EVENTS_OBSERVABLE)
+        for ev in ["PreToolUse", "PostToolUse", "SessionStart",
+                   "UserPromptSubmit", "Notification", "PostCompact"]:
+            self.assertIn(ev, paleo.HOOK_EVENTS_CONFIG_ONLY)
+            self.assertNotIn(ev, paleo.HOOK_EVENTS_OBSERVABLE)
+
+
 class TestHealthSummary(unittest.TestCase):
     def test_crons_summary_row_shape(self):
         rows = paleo._crons_summary()

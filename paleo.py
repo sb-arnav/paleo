@@ -861,6 +861,252 @@ def cmd_crons(args: argparse.Namespace, _usage: Usage) -> int:
     return 1
 
 
+# ----- hooks: cross-check configured hooks against JSONL fire records --------
+
+
+# Hook events Claude Code supports. Sourced from settings.json / settings.local.json
+# (user-level) and ~/.claude/plugins/cache/<plugin>/.../hooks/hooks.json (plugin-level,
+# enabled via installed_plugins.json's installPath field).
+#
+# `hookInfos` in JSONL only records Stop event hooks (system records with
+# subtype=stop_hook_summary). For other event types (PreToolUse, PostToolUse,
+# SessionStart, UserPromptSubmit, Notification, PostCompact) Claude Code does
+# not emit fire records into JSONL — so paleo classifies them as `config-only`
+# rather than `never-fired`.
+HOOK_EVENTS_OBSERVABLE = {"Stop"}
+HOOK_EVENTS_CONFIG_ONLY = {
+    "PreToolUse", "PostToolUse", "SessionStart",
+    "UserPromptSubmit", "Notification", "PostCompact",
+    "SubagentStop", "PreCompact",
+}
+
+
+def discover_hooks() -> list[dict]:
+    """Return every configured hook across user settings + enabled plugins.
+
+    Each entry: {event, matcher, command, source}. `source` is a short label
+    showing where the hook came from (settings, settings.local, or
+    plugin:<slug>) so the user can locate misbehaving entries.
+    """
+    out: list[dict] = []
+
+    for path, label in (
+        (CLAUDE / "settings.json", "settings"),
+        (CLAUDE / "settings.local.json", "settings.local"),
+    ):
+        for entry in _read_hooks_file(path):
+            entry["source"] = label
+            out.append(entry)
+
+    installed = _load_json(CLAUDE / "plugins" / "installed_plugins.json").get("plugins", {})
+    if isinstance(installed, dict):
+        for plugin_id, instances in installed.items():
+            if not isinstance(instances, list):
+                continue
+            for inst in instances:
+                if not isinstance(inst, dict):
+                    continue
+                install_path = inst.get("installPath")
+                if not install_path:
+                    continue
+                hooks_file = pathlib.Path(install_path) / "hooks" / "hooks.json"
+                short = plugin_id.split("@", 1)[0]
+                for entry in _read_hooks_file(hooks_file):
+                    entry["source"] = f"plugin:{short}"
+                    out.append(entry)
+
+    return out
+
+
+def _read_hooks_file(path: pathlib.Path) -> list[dict]:
+    """Extract hooks from a settings.json or plugin hooks.json. Tolerant of
+    missing files and malformed shapes — returns [] rather than raising."""
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+    hooks_root = data.get("hooks") if isinstance(data, dict) else None
+    if not isinstance(hooks_root, dict):
+        return []
+    out: list[dict] = []
+    for event, defs in hooks_root.items():
+        if not isinstance(defs, list):
+            continue
+        for entry in defs:
+            if not isinstance(entry, dict):
+                continue
+            matcher = entry.get("matcher", "")
+            for h in entry.get("hooks", []) or []:
+                if not isinstance(h, dict):
+                    continue
+                cmd = h.get("command")
+                if not cmd:
+                    continue
+                out.append({
+                    "event": event,
+                    "matcher": matcher,
+                    "command": cmd,
+                })
+    return out
+
+
+def collect_hook_fires(
+    logs_root: pathlib.Path,
+    since_seconds: float | None,
+) -> dict[str, dict]:
+    """Aggregate Stop-hook fire stats per command from JSONL.
+
+    Returns {command: {"fires": int, "last_ts": str|None, "total_ms": int,
+    "max_ms": int}}. Only `system` records with subtype=stop_hook_summary
+    contribute — that's the only place Claude Code emits hookInfos.
+    """
+    cutoff = time.time() - since_seconds if since_seconds else None
+    stats: dict[str, dict] = {}
+    for jsonl in _iter_session_jsonl(logs_root):
+        try:
+            mtime = jsonl.stat().st_mtime
+        except OSError:
+            continue
+        if cutoff is not None and mtime < cutoff:
+            continue
+        try:
+            with jsonl.open() as fh:
+                for line in fh:
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if rec.get("type") != "system":
+                        continue
+                    if rec.get("subtype") != "stop_hook_summary":
+                        continue
+                    infos = rec.get("hookInfos")
+                    if not isinstance(infos, list):
+                        continue
+                    ts = rec.get("timestamp")
+                    for h in infos:
+                        if not isinstance(h, dict):
+                            continue
+                        cmd = h.get("command")
+                        if not cmd:
+                            continue
+                        dur = int(h.get("durationMs") or 0)
+                        s = stats.setdefault(cmd, {
+                            "fires": 0, "last_ts": None, "total_ms": 0, "max_ms": 0,
+                        })
+                        s["fires"] += 1
+                        s["total_ms"] += dur
+                        if dur > s["max_ms"]:
+                            s["max_ms"] = dur
+                        if ts and (s["last_ts"] is None or ts > s["last_ts"]):
+                            s["last_ts"] = ts
+        except OSError:
+            continue
+    return stats
+
+
+def cmd_hooks(args: argparse.Namespace, _usage: Usage) -> int:
+    logs_root = pathlib.Path(args.logs).expanduser()
+    since = args.days * 86400 if args.days else None
+    configured = discover_hooks()
+    fires = collect_hook_fires(logs_root, since)
+
+    rows: list[dict] = []
+    for h in configured:
+        cmd = h["command"]
+        f = fires.get(cmd)
+        observable = h["event"] in HOOK_EVENTS_OBSERVABLE
+        if not observable:
+            status = "config-only"
+        elif f is None or f["fires"] == 0:
+            status = "never-fired"
+        else:
+            status = "ok"
+        rows.append({
+            "event": h["event"],
+            "matcher": h.get("matcher", ""),
+            "command": cmd,
+            "source": h["source"],
+            "status": status,
+            "fires": f["fires"] if f else 0,
+            "last_ts": f["last_ts"] if f else None,
+            "avg_ms": int(f["total_ms"] / f["fires"]) if f and f["fires"] else 0,
+            "max_ms": f["max_ms"] if f else 0,
+        })
+
+    # Surface fired commands that aren't in any settings file — likely
+    # leftover hooks from a since-uninstalled plugin or a previous config.
+    configured_cmds = {h["command"] for h in configured}
+    orphan_fires = [
+        (cmd, s) for cmd, s in fires.items() if cmd not in configured_cmds
+    ]
+
+    if args.json:
+        json.dump({"hooks": rows, "orphan_fires": [
+            {"command": c, **s} for c, s in orphan_fires
+        ]}, sys.stdout, indent=2, default=str)
+        print()
+        return 1 if any(r["status"] == "never-fired" for r in rows) else 0
+
+    print(f"paleo hooks · {len(rows)} configured · "
+          f"{sum(1 for r in rows if r['status']=='ok')} firing · "
+          f"{sum(1 for r in rows if r['status']=='never-fired')} never-fired · "
+          f"{sum(1 for r in rows if r['status']=='config-only')} config-only")
+    print()
+
+    by_status = {"never-fired": [], "ok": [], "config-only": []}
+    for r in rows:
+        by_status[r["status"]].append(r)
+
+    if by_status["never-fired"]:
+        print("NEVER-FIRED (Stop hooks configured but no record in window — likely broken)")
+        for r in by_status["never-fired"]:
+            print(f"  [{r['event']}] {r['command'][:90]}")
+            print(f"     source: {r['source']}")
+        print()
+
+    if by_status["ok"] and args.show > 0:
+        print("FIRING (Stop hooks)")
+        shown = sorted(by_status["ok"], key=lambda r: -r["fires"])[:args.show]
+        for r in shown:
+            age = ""
+            if r["last_ts"]:
+                age = f"  last: {r['last_ts'][:19]}"
+            slow = ""
+            if r["max_ms"] >= 1000:
+                slow = f"  ⚠ max {r['max_ms']}ms"
+            print(f"  {r['fires']:5d}x  avg {r['avg_ms']:4d}ms{slow}{age}")
+            print(f"         {r['command'][:90]}")
+        if len(by_status["ok"]) > len(shown):
+            print(f"  ... and {len(by_status['ok']) - len(shown)} more")
+        print()
+
+    if by_status["config-only"] and args.show > 0:
+        print(f"CONFIG-ONLY ({len(by_status['config-only'])} hooks on non-Stop events — "
+              "fire status not observable from JSONL)")
+        by_event = collections.Counter(r["event"] for r in by_status["config-only"])
+        for ev, n in by_event.most_common():
+            print(f"  {ev}: {n}")
+        print()
+
+    if orphan_fires:
+        print(f"ORPHAN FIRES ({len(orphan_fires)} commands fired but not in any settings file — "
+              "uninstalled plugin or removed hook still referenced)")
+        for cmd, s in sorted(orphan_fires, key=lambda x: -x[1]["fires"])[:args.show]:
+            print(f"  {s['fires']:5d}x  {cmd[:90]}")
+        print()
+
+    never = len(by_status["never-fired"])
+    if never:
+        print(f"✗ {never} Stop hook(s) configured but never fired in window. "
+              "Check whether they're broken or whether the window is too short.")
+        return 1
+    print(f"✓ {sum(1 for r in rows if r['status']=='ok')} Stop hook(s) firing healthy.")
+    return 0
+
+
 # ----- claims: cross-check MEMORY.md paths against disk ----------------------
 
 
@@ -1121,6 +1367,18 @@ def cmd_health(args: argparse.Namespace, usage: Usage) -> int:
         crons_problems = 0
         crons_total = 0
 
+    # hooks
+    hooks_configured = discover_hooks()
+    hook_fires = collect_hook_fires(logs_root, since)
+    hook_configured_cmds = {h["command"] for h in hooks_configured}
+    hooks_never_fired = sum(
+        1 for h in hooks_configured
+        if h["event"] in HOOK_EVENTS_OBSERVABLE
+        and hook_fires.get(h["command"], {"fires": 0})["fires"] == 0
+    )
+    hooks_orphan = sum(1 for cmd in hook_fires if cmd not in hook_configured_cmds)
+    hooks_observable = sum(1 for h in hooks_configured if h["event"] in HOOK_EVENTS_OBSERVABLE)
+
     # plugins
     marketplaces = _load_json(KNOWN_MARKETPLACES_FILE)
     third_party = sum(
@@ -1135,6 +1393,12 @@ def cmd_health(args: argparse.Namespace, usage: Usage) -> int:
         "policy": {"attempted": policy_attempted, "succeeded": policy_succeeded},
         "claims": {"missing": claims_missing, "total": claims_total},
         "crons": {"problems": crons_problems, "total": crons_total},
+        "hooks": {
+            "never_fired": hooks_never_fired,
+            "orphan": hooks_orphan,
+            "observable": hooks_observable,
+            "total": len(hooks_configured),
+        },
         "plugins": {"third_party_marketplaces": third_party, "total": len(marketplaces)},
     }
 
@@ -1142,6 +1406,7 @@ def cmd_health(args: argparse.Namespace, usage: Usage) -> int:
         policy_succeeded > 0
         or claims_missing > 0
         or crons_problems > 0
+        or hooks_never_fired > 0
         or third_party > 0
     )
 
@@ -1176,6 +1441,14 @@ def cmd_health(args: argparse.Namespace, usage: Usage) -> int:
         "crons",
         crons_problems == 0,
         f"{crons_problems} of {crons_total} jobs need attention",
+    )
+    line(
+        "hooks",
+        hooks_never_fired == 0,
+        (
+            f"{hooks_never_fired} of {hooks_observable} Stop hooks never fired"
+            + (f", {hooks_orphan} orphan" if hooks_orphan else "")
+        ),
     )
     line(
         "plugins",
@@ -1257,6 +1530,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("mcps", "MCP usage table"),
         ("agents", "Subagent usage table"),
         ("policy", "Detect tool invocations that violate hard-block policies"),
+        ("hooks", "Detect Stop-hook silent breakage (configured but never fired)"),
         ("claims", "Fact-check paths referenced in your MEMORY.md tree against disk"),
         ("crons", "Surface silent cron failures (logs that stopped updating)"),
         ("plugins", "Audit installed plugin marketplaces — owner, age, supply-chain risk"),
@@ -1313,6 +1587,7 @@ def main(argv: list[str] | None = None) -> int:
         "mcps": cmd_mcps,
         "agents": cmd_agents,
         "policy": cmd_policy,
+        "hooks": cmd_hooks,
         "claims": cmd_claims,
         "crons": cmd_crons,
         "plugins": cmd_plugins,
