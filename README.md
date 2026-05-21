@@ -69,6 +69,7 @@ Requires Python 3.10+. Zero dependencies.
 | `claims` | Paths cited in MEMORY.md tree that no longer exist | any missing path |
 | `crons` | Cron jobs whose log file hasn't been touched recently | any stale or missing |
 | `plugins` | Plugin marketplaces + per-plugin metadata; flags third-party marketplaces | any third-party marketplace |
+| `health` | One-screen summary across `dead`, `policy`, `claims`, `crons`, `plugins` — designed for daily-digest cron use | any constituent check fails |
 | `top` | Top tools by raw invocation count | never |
 | `skills` | Per-skill usage table | never |
 | `mcps` | Per-MCP usage table (local + plugin + ghost connectors) | never |
@@ -78,7 +79,7 @@ Requires Python 3.10+. Zero dependencies.
 
 - `--days N` — restrict to sessions modified in last N days. Omit for all-time.
 - `--show N` — max rows per section (default 15, `0` = none).
-- `--json` — machine-readable output (currently `dead`, `policy`, `claims`, `crons`, `plugins`). Pipes into `jq`.
+- `--json` — machine-readable output (currently `dead`, `policy`, `claims`, `crons`, `plugins`, `health`). Pipes into `jq`.
 - `--logs PATH` — point at a different log root if you keep your `~/.claude/` elsewhere.
 
 ## Claims (memory fact-check)

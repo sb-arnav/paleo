@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.8 — 2026-05-21
+
+- New: `paleo health` — composes `dead`, `policy`, `claims`, `crons`, and `plugins` into a single one-screen summary. Exits non-zero when any constituent check would have exited non-zero. Intended for daily-digest cron use:
+
+  ```
+  $ paleo health
+  WORKSPACE HEALTH
+
+    [✓] dead       239 skills · 60 agents · 14 mcps never invoked
+    [✗] policy     9 attempts, 5 succeeded (see details)
+    [✗] claims     4 missing of 81 paths checked
+    [✓] crons      0 of 10 jobs need attention
+    [✗] plugins    1 third-party of 2 marketplaces
+  ```
+
+- Also available as `paleo --json health` for dashboard ingestion.
+- Test added (25 total).
+
 ## v0.7 — 2026-05-21
 
 - `paleo claims` is meaningfully more precise. Three improvements:

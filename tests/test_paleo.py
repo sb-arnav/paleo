@@ -216,6 +216,14 @@ class TestPolicyOutcome(unittest.TestCase):
             self.assertEqual(succeeded[0]["tool_name"], "mcp__claude_ai_Linear__list_projects")
 
 
+class TestHealthSummary(unittest.TestCase):
+    def test_crons_summary_row_shape(self):
+        rows = paleo._crons_summary()
+        for r in rows:
+            self.assertIn("status", r)
+            self.assertIn(r["status"], {"ok", "stale", "missing-log", "no-log-redirect", "stat-error"})
+
+
 class TestCollectUsageWindow(unittest.TestCase):
     def test_skips_files_older_than_window(self):
         with tempfile.TemporaryDirectory() as td:

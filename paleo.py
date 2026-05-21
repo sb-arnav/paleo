@@ -997,6 +997,162 @@ def cmd_agents(args: argparse.Namespace, usage: Usage) -> int:
     return 0
 
 
+# ----- health: one-screen summary across all checks --------------------------
+
+
+def cmd_health(args: argparse.Namespace, usage: Usage) -> int:
+    """Compose every other check into a one-screen workspace summary.
+
+    Intended for cron-driven daily digests or any 'how's my workspace today'
+    glance. Exit code: 1 if any individual check would have exited non-zero.
+    """
+    logs_root = pathlib.Path(args.logs).expanduser()
+    since = args.days * 86400 if args.days else None
+
+    # dead
+    skills_inst = discover_skills()
+    mcps_inst = discover_mcps()
+    agents_inst = discover_agents()
+    dead_skills = len(set(skills_inst) - set(usage.skill_uses))
+    dead_agents = len(set(agents_inst) - set(usage.agent_uses))
+    dead_mcps_local = sum(
+        1 for m in (set(mcps_inst) - set(usage.mcp_uses)) if not m.startswith("claude_ai_")
+    )
+
+    # policy
+    policy_hits, _ = collect_policy_hits(logs_root, since, DEFAULT_POLICIES)
+    policy_attempted = sum(len(items) for items in policy_hits.values())
+    policy_succeeded = sum(
+        sum(1 for h in items if h["blocked"] is False) for items in policy_hits.values()
+    )
+
+    # claims
+    claims_missing = 0
+    claims_total = 0
+    memory_md = None
+    candidates = sorted((CLAUDE / "projects").glob("*/memory/MEMORY.md"))
+    if candidates:
+        memory_md = candidates[0]
+        files = _walk_memory(memory_md)
+        for f in files:
+            try:
+                paths = _extract_paths(f.read_text(errors="replace"))
+            except OSError:
+                continue
+            for raw in paths:
+                claims_total += 1
+                if not _expand(raw).exists():
+                    claims_missing += 1
+
+    # crons
+    try:
+        crons_rows = _crons_summary()
+        crons_problems = sum(
+            1 for r in crons_rows if r["status"] in ("stale", "missing-log", "stat-error")
+        )
+        crons_total = len(crons_rows)
+    except Exception:
+        crons_rows = []
+        crons_problems = 0
+        crons_total = 0
+
+    # plugins
+    marketplaces = _load_json(KNOWN_MARKETPLACES_FILE)
+    third_party = sum(
+        1
+        for _, meta in marketplaces.items()
+        if (meta.get("source", {}).get("repo", "").split("/")[0] or "").lower()
+        not in TRUSTED_MARKETPLACES
+    )
+
+    summary = {
+        "dead": {"skills": dead_skills, "agents": dead_agents, "mcps_local": dead_mcps_local},
+        "policy": {"attempted": policy_attempted, "succeeded": policy_succeeded},
+        "claims": {"missing": claims_missing, "total": claims_total},
+        "crons": {"problems": crons_problems, "total": crons_total},
+        "plugins": {"third_party_marketplaces": third_party, "total": len(marketplaces)},
+    }
+
+    failing = (
+        policy_succeeded > 0
+        or claims_missing > 0
+        or crons_problems > 0
+        or third_party > 0
+    )
+
+    if args.json:
+        json.dump({"healthy": not failing, "summary": summary}, sys.stdout, indent=2)
+        print()
+        return 1 if failing else 0
+
+    _print_header(usage, args.days)
+    print("WORKSPACE HEALTH")
+    print()
+    icon_ok = "✓"
+    icon_bad = "✗"
+
+    def line(label: str, ok: bool, detail: str) -> None:
+        print(f"  [{icon_ok if ok else icon_bad}] {label:<10} {detail}")
+
+    line("dead", True, f"{dead_skills} skills · {dead_agents} agents · {dead_mcps_local} mcps never invoked")
+    line(
+        "policy",
+        policy_succeeded == 0,
+        f"{policy_attempted} attempts, {policy_succeeded} succeeded "
+        f"({'all blocked' if policy_attempted and not policy_succeeded else 'see details'})",
+    )
+    line(
+        "claims",
+        claims_missing == 0,
+        f"{claims_missing} missing of {claims_total} paths checked"
+        + (f" in {memory_md.name}" if memory_md else " (no memory index found)"),
+    )
+    line(
+        "crons",
+        crons_problems == 0,
+        f"{crons_problems} of {crons_total} jobs need attention",
+    )
+    line(
+        "plugins",
+        third_party == 0,
+        f"{third_party} third-party of {len(marketplaces)} marketplaces",
+    )
+
+    print()
+    if failing:
+        print("Run the individual subcommand for details on any failing line.")
+        return 1
+    print("All checks green.")
+    return 0
+
+
+def _crons_summary() -> list[dict]:
+    """Return per-cron status rows. Reused by cmd_health."""
+    crons = _list_crons()
+    now = time.time()
+    rows: list[dict] = []
+    default_slack_hours = 25.0
+    for schedule, command in crons:
+        log_match = CRON_LOG_RE.search(command)
+        log_path = pathlib.Path(log_match.group(1)) if log_match else None
+        interval_h = _expected_interval_hours(schedule)
+        slack = max(default_slack_hours, interval_h * 2)
+        status = "ok"
+        if log_path is None:
+            status = "no-log-redirect"
+        elif not log_path.exists():
+            status = "missing-log"
+        else:
+            try:
+                age_s = now - log_path.stat().st_mtime
+                if age_s / 3600.0 > slack:
+                    status = "stale"
+            except OSError:
+                status = "stat-error"
+        rows.append({"status": status})
+    return rows
+
+
 # ----- entry point -----------------------------------------------------------
 
 
@@ -1039,6 +1195,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("claims", "Fact-check paths referenced in your MEMORY.md tree against disk"),
         ("crons", "Surface silent cron failures (logs that stopped updating)"),
         ("plugins", "Audit installed plugin marketplaces — owner, age, supply-chain risk"),
+        ("health", "One-screen summary across dead/policy/claims/crons/plugins"),
     ]:
         sp = sub.add_parser(name, help=helptext)
         if name == "skills":
@@ -1084,6 +1241,7 @@ def main(argv: list[str] | None = None) -> int:
         "claims": cmd_claims,
         "crons": cmd_crons,
         "plugins": cmd_plugins,
+        "health": cmd_health,
     }
     return dispatch[args.cmd](args, usage)
 
