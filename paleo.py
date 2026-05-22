@@ -1306,6 +1306,18 @@ def cmd_agents(args: argparse.Namespace, usage: Usage) -> int:
 # ----- project: attribute session activity to the project (cwd) it ran in ----
 
 
+# Agent worktrees (`<project>/.claude/worktrees/agent-<hash>`) are isolated
+# execution sandboxes, not projects. The work done in them belongs to the
+# parent project, so roll the cwd up rather than letting each sandbox show as
+# its own "project."
+_WORKTREE_RE = re.compile(r"^(.*?)/\.claude/worktrees/")
+
+
+def _normalize_project_cwd(cwd: str) -> str:
+    m = _WORKTREE_RE.match(cwd)
+    return m.group(1) if m else cwd
+
+
 def collect_projects(
     logs_root: pathlib.Path,
     since_seconds: float | None,
@@ -1341,7 +1353,7 @@ def collect_projects(
                         continue
                     cwd = rec.get("cwd")
                     if cwd:
-                        cwd_counts[cwd] += 1
+                        cwd_counts[_normalize_project_cwd(cwd)] += 1
                     msg = rec.get("message")
                     if not isinstance(msg, dict):
                         continue

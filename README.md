@@ -106,7 +106,7 @@ PROJECTS · 9 projects · 290 sessions
   ...
 ```
 
-It answers "which project is eating my Claude Code time" and "which skills actually fire where" — so a workspace-global `dead` finding ("you never use skill X") can be checked against the project it would have fired in. Informational: never exits non-zero. Sessions wander across directories, so attribution uses the dominant `cwd` per session (empirically 70–100% of a session's records share one home directory).
+It answers "which project is eating my Claude Code time" and "which skills actually fire where" — so a workspace-global `dead` finding ("you never use skill X") can be checked against the project it would have fired in. Informational: never exits non-zero. Sessions wander across directories, so attribution uses the dominant `cwd` per session (empirically 70–100% of a session's records share one home directory). Agent worktrees (`<project>/.claude/worktrees/agent-*`) are rolled up to their parent project — they're sub-agent execution sandboxes, and their work belongs to the project that spawned them.
 
 ## Claims (memory fact-check)
 

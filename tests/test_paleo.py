@@ -420,6 +420,26 @@ class TestProjectAttribution(unittest.TestCase):
             self.assertEqual(projects["/proj/alpha"]["sessions"], 3)
             self.assertEqual(projects["/proj/alpha"]["tool_calls"], 3)
 
+    def test_normalize_rolls_up_agent_worktrees(self):
+        n = paleo._normalize_project_cwd
+        self.assertEqual(n("/home/u/myapp/.claude/worktrees/agent-abc"), "/home/u/myapp")
+        self.assertEqual(n("/home/u/myapp/.claude/worktrees/agent-abc/src-tauri"), "/home/u/myapp")
+        self.assertEqual(n("/home/u/myapp/src-tauri"), "/home/u/myapp/src-tauri")
+        self.assertEqual(n("/home/u/myapp"), "/home/u/myapp")
+
+    def test_worktree_activity_attributed_to_parent(self):
+        """A session that ran in an agent worktree counts toward the parent."""
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            s = root / "s.jsonl"
+            s.write_text(json.dumps({
+                "cwd": "/proj/alpha/.claude/worktrees/agent-xyz",
+                "message": {"content": [{"type": "tool_use", "name": "Bash"}]},
+            }) + "\n")
+            projects = paleo.collect_projects(root, None)
+            self.assertEqual(set(projects.keys()), {"/proj/alpha"})
+            self.assertEqual(projects["/proj/alpha"]["sessions"], 1)
+
     def test_session_with_no_cwd_is_skipped(self):
         with tempfile.TemporaryDirectory() as td:
             root = pathlib.Path(td)

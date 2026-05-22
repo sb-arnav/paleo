@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.12 — 2026-05-22
+
+- `paleo project` now rolls agent worktrees (`<project>/.claude/worktrees/agent-<hash>`) up to their parent project. These are isolated sub-agent execution sandboxes, not projects — before this, each one showed as its own one-session "project," fragmenting the view and hiding that the work belonged to the parent. On the dev workspace this collapsed 8 phantom entries and reclaimed their sessions into the parent projects that spawned them.
+- 2 new tests (46 total): worktree path normalization, and worktree activity attributed to the parent project.
+
 ## v0.11 — 2026-05-22
 
 - New: `paleo ghosts` — detects sub-agents that reported `status: completed` with `totalToolUseCount: 0` **and** whose return text asserts a side-effect ("created the file," "ran the tests," "committed"). With zero tool calls that claim is provably false: nothing was persisted. This is the open, unfixed failure in [anthropics/claude-code#4462](https://github.com/anthropics/claude-code/issues/4462) (37+ comments). Prints the matched claim so each finding justifies itself. Exits 1 on any ghost; wired into `health`; supports `--json` and `--min-tokens`.
