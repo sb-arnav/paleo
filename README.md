@@ -72,13 +72,37 @@ Requires Python 3.10+. Zero dependencies.
 | `skills` | Per-skill usage table | never |
 | `mcps` | Per-MCP usage table (local + plugin + ghost connectors) | never |
 | `agents` | Per-subagent dispatch count | never |
+| `project` | Activity attributed to the project (`cwd`) each session ran in — sessions, tool calls, top tools/skills | never |
 
 ## Common flags
 
 - `--days N` — restrict to sessions modified in last N days. Omit for all-time.
 - `--show N` — max rows per section (default 15, `0` = none).
-- `--json` — machine-readable output (currently `dead`, `policy`, `hooks`, `claims`, `crons`, `plugins`, `health`). Pipes into `jq`.
+- `--json` — machine-readable output (currently `dead`, `policy`, `hooks`, `claims`, `crons`, `plugins`, `project`, `health`). Pipes into `jq`.
 - `--logs PATH` — point at a different log root if you keep your `~/.claude/` elsewhere.
+
+## Project (where your time actually went)
+
+`paleo project` attributes each session to the project directory it ran in (its dominant `cwd`) and aggregates activity: session count, tool calls, and the top tools and skills used in each.
+
+```bash
+paleo project               # all projects, busiest first
+paleo --days 7 project      # this week only
+paleo --json project        # pipe into jq
+```
+
+```
+PROJECTS · 9 projects · 290 sessions
+
+  app-frontend       159 sessions ·  9,630 tool calls · last 5m ago
+     tools: Bash(5072)  Read(2316)  Edit(1038)  Write(375)  WebSearch(204)
+     skills: deploy(4)  e2e-check(2)
+  api-service         32 sessions ·  2,230 tool calls · last 18h ago
+     tools: Bash(905)  Read(466)  Edit(164)  Write(140)
+  ...
+```
+
+It answers "which project is eating my Claude Code time" and "which skills actually fire where" — so a workspace-global `dead` finding ("you never use skill X") can be checked against the project it would have fired in. Informational: never exits non-zero. Sessions wander across directories, so attribution uses the dominant `cwd` per session (empirically 70–100% of a session's records share one home directory).
 
 ## Claims (memory fact-check)
 

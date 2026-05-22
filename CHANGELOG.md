@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.10 — 2026-05-22
+
+- New: `paleo project` — attributes each session to the project directory it ran in (dominant `cwd`) and aggregates session count, tool calls, and top tools/skills per project. Answers "which project is eating my Claude Code time" and "which skills fire where," so a workspace-global `dead` finding can be checked against the project it would have fired in. Informational; never exits non-zero. Supports `--json`.
+- Attribution uses the dominant `cwd` per session because sessions wander across directories — empirically the home directory covers 70–100% of a session's records.
+- README rewritten: leads with the pain (not a feature list), promotes `paleo health` to the hero block, and reframes all checks under one thesis — each surfaces a place where the workspace's claim diverges from what the sessions show. Links the Anthropic issues documenting the claims (#26757) and hooks (#16047, #2891) failure modes.
+- 3 new tests (38 total): dominant-cwd attribution, multi-session aggregation, no-cwd skip.
+
 ## v0.9 — 2026-05-21
 
 - New: `paleo hooks` — enumerates every Claude Code hook configured across `~/.claude/settings.json`, `~/.claude/settings.local.json`, and each enabled plugin's `hooks/hooks.json` (resolved via `installed_plugins.json` `installPath`), then cross-references against JSONL `stop_hook_summary` records to determine which Stop hooks actually fired.

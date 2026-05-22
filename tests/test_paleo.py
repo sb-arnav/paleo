@@ -378,6 +378,59 @@ class TestHookFires(unittest.TestCase):
             self.assertNotIn(ev, paleo.HOOK_EVENTS_OBSERVABLE)
 
 
+class TestProjectAttribution(unittest.TestCase):
+    def test_assigns_session_to_dominant_cwd(self):
+        """A session is attributed to the cwd appearing on the most records,
+        even when some records wander into other directories."""
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            session = root / "s1.jsonl"
+            lines = [
+                {"cwd": "/proj/alpha", "message": {"content": [
+                    {"type": "tool_use", "name": "Bash"}]}},
+                {"cwd": "/proj/alpha", "message": {"content": [
+                    {"type": "tool_use", "name": "Read"}]}},
+                {"cwd": "/proj/alpha", "message": {"content": [
+                    {"type": "tool_use", "name": "Skill",
+                     "input": {"skill": "deploy"}}]}},
+                # one stray record in another dir — should NOT flip attribution
+                {"cwd": "/proj/beta", "message": {"content": [
+                    {"type": "tool_use", "name": "Edit"}]}},
+            ]
+            session.write_text("\n".join(json.dumps(L) for L in lines) + "\n")
+            projects = paleo.collect_projects(root, None)
+            self.assertEqual(set(projects.keys()), {"/proj/alpha"})
+            p = projects["/proj/alpha"]
+            self.assertEqual(p["sessions"], 1)
+            self.assertEqual(p["tool_calls"], 4)  # all tool_uses count
+            self.assertEqual(p["tools"]["Bash"], 1)
+            self.assertEqual(p["tools"]["Edit"], 1)
+            self.assertEqual(p["skills"]["deploy"], 1)
+
+    def test_aggregates_multiple_sessions_per_project(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            for i in range(3):
+                s = root / f"s{i}.jsonl"
+                s.write_text(json.dumps({
+                    "cwd": "/proj/alpha",
+                    "message": {"content": [{"type": "tool_use", "name": "Bash"}]},
+                }) + "\n")
+            projects = paleo.collect_projects(root, None)
+            self.assertEqual(projects["/proj/alpha"]["sessions"], 3)
+            self.assertEqual(projects["/proj/alpha"]["tool_calls"], 3)
+
+    def test_session_with_no_cwd_is_skipped(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            s = root / "s.jsonl"
+            s.write_text(json.dumps({
+                "message": {"content": [{"type": "tool_use", "name": "Bash"}]},
+            }) + "\n")
+            projects = paleo.collect_projects(root, None)
+            self.assertEqual(projects, {})
+
+
 class TestHealthSummary(unittest.TestCase):
     def test_crons_summary_row_shape(self):
         rows = paleo._crons_summary()

@@ -1303,6 +1303,124 @@ def cmd_agents(args: argparse.Namespace, usage: Usage) -> int:
     return 0
 
 
+# ----- project: attribute session activity to the project (cwd) it ran in ----
+
+
+def collect_projects(
+    logs_root: pathlib.Path,
+    since_seconds: float | None,
+) -> dict[str, dict]:
+    """Attribute each session to its dominant `cwd` and aggregate activity.
+
+    Returns {cwd: {"sessions": int, "tool_calls": int, "tools": Counter,
+    "skills": Counter, "last_ts": float}}. A session is assigned to the cwd
+    that appears on the most of its records — sessions wander across dirs but
+    almost always have one clear home (verified empirically: the dominant cwd
+    covers 70-100% of records).
+    """
+    cutoff = time.time() - since_seconds if since_seconds else None
+    projects: dict[str, dict] = {}
+    for jsonl in _iter_session_jsonl(logs_root):
+        try:
+            mtime = jsonl.stat().st_mtime
+        except OSError:
+            continue
+        if cutoff is not None and mtime < cutoff:
+            continue
+
+        cwd_counts: collections.Counter = collections.Counter()
+        tool_counts: collections.Counter = collections.Counter()
+        skill_counts: collections.Counter = collections.Counter()
+        tool_total = 0
+        try:
+            with jsonl.open() as fh:
+                for line in fh:
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    cwd = rec.get("cwd")
+                    if cwd:
+                        cwd_counts[cwd] += 1
+                    msg = rec.get("message")
+                    if not isinstance(msg, dict):
+                        continue
+                    content = msg.get("content")
+                    if not isinstance(content, list):
+                        continue
+                    for block in content:
+                        if not isinstance(block, dict) or block.get("type") != "tool_use":
+                            continue
+                        name = block.get("name") or "?"
+                        tool_counts[name] += 1
+                        tool_total += 1
+                        if name == "Skill":
+                            sk = (block.get("input") or {}).get("skill") or "?"
+                            skill_counts[sk] += 1
+        except OSError:
+            continue
+
+        if not cwd_counts:
+            continue
+        home_cwd = cwd_counts.most_common(1)[0][0]
+        p = projects.setdefault(home_cwd, {
+            "sessions": 0, "tool_calls": 0,
+            "tools": collections.Counter(), "skills": collections.Counter(),
+            "last_ts": 0.0,
+        })
+        p["sessions"] += 1
+        p["tool_calls"] += tool_total
+        p["tools"].update(tool_counts)
+        p["skills"].update(skill_counts)
+        if mtime > p["last_ts"]:
+            p["last_ts"] = mtime
+    return projects
+
+
+def cmd_project(args: argparse.Namespace, _usage: Usage) -> int:
+    logs_root = pathlib.Path(args.logs).expanduser()
+    since = args.days * 86400 if args.days else None
+    projects = collect_projects(logs_root, since)
+
+    rows = sorted(projects.items(), key=lambda kv: -kv[1]["tool_calls"])
+
+    if args.json:
+        out = {
+            cwd: {
+                "sessions": d["sessions"],
+                "tool_calls": d["tool_calls"],
+                "top_tools": dict(d["tools"].most_common(8)),
+                "top_skills": dict(d["skills"].most_common(8)),
+                "last_ts": d["last_ts"],
+            }
+            for cwd, d in rows
+        }
+        json.dump(out, sys.stdout, indent=2, default=str)
+        print()
+        return 0
+
+    _print_header(_usage, args.days)
+    total_sessions = sum(d["sessions"] for _, d in rows)
+    print(f"PROJECTS · {len(rows)} projects · {total_sessions} sessions")
+    print()
+    now = time.time()
+    shown = rows[: args.show] if args.show > 0 else rows
+    for cwd, d in shown:
+        name = pathlib.Path(cwd).name or cwd
+        age = _fmt_age(now - d["last_ts"]) if d["last_ts"] else "?"
+        print(f"  {name:<18} {d['sessions']:3d} sessions · "
+              f"{d['tool_calls']:6,d} tool calls · last {age} ago")
+        top_tools = "  ".join(f"{t}({n})" for t, n in d["tools"].most_common(5))
+        if top_tools:
+            print(f"     tools: {top_tools}")
+        if d["skills"]:
+            top_skills = "  ".join(f"{s}({n})" for s, n in d["skills"].most_common(4))
+            print(f"     skills: {top_skills}")
+    if len(rows) > len(shown):
+        print(f"  ... and {len(rows) - len(shown)} more (raise --show)")
+    return 0
+
+
 # ----- health: one-screen summary across all checks --------------------------
 
 
@@ -1530,6 +1648,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("skills", "Skill invocation table"),
         ("mcps", "MCP usage table"),
         ("agents", "Subagent usage table"),
+        ("project", "Attribute session activity to the project (cwd) it ran in"),
         ("policy", "Detect tool invocations that violate hard-block policies"),
         ("hooks", "Detect Stop-hook silent breakage (configured but never fired)"),
         ("claims", "Fact-check paths referenced in your MEMORY.md tree against disk"),
@@ -1587,6 +1706,7 @@ def main(argv: list[str] | None = None) -> int:
         "skills": cmd_skills,
         "mcps": cmd_mcps,
         "agents": cmd_agents,
+        "project": cmd_project,
         "policy": cmd_policy,
         "hooks": cmd_hooks,
         "claims": cmd_claims,
