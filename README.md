@@ -19,6 +19,7 @@ WORKSPACE HEALTH
   [✓] dead       238 skills · 60 agents · 14 mcps never invoked
   [✓] policy     2 attempts, 0 succeeded (all blocked)
   [✓] hooks      0 of 4 Stop hooks never fired, 1 orphan
+  [✓] ghosts     0 subagent runs did nothing
   [✗] claims     2 missing of 80 paths checked in MEMORY.md
   [✗] crons      2 of 10 jobs need attention
   [✗] plugins    1 third-party of 2 marketplaces
@@ -28,16 +29,17 @@ Run the individual subcommand for details on any failing line.
 
 Exit code is non-zero when anything's wrong, so `paleo health` drops straight into a daily-digest cron or a CI gate. No network. No mutation. Stdlib only. Reads from `~/.claude/`.
 
-## The six things it checks
+## The seven things it checks
 
 Each subcommand surfaces one place where your workspace's claim diverges from what actually happened:
 
 1. **`dead`** — config says "248 skills installed," sessions say "you used 10." Most power-user workspaces accumulate hundreds of skills/MCPs/subagents; without telemetry you can't tell load-bearing from fossil.
 2. **`policy`** — your hook says "blocked," the JSONL says "succeeded." If you decided "never call `mcp__claude_ai_*`," has anything called it anyway — and did the call actually get stopped?
 3. **`hooks`** — `settings.json` says "installed," the JSONL says "never fired." Catches Stop hooks that broke silently (the failure mode in [#16047](https://github.com/anthropics/claude-code/issues/16047) / [#2891](https://github.com/anthropics/claude-code/issues/2891)) plus orphan hooks still firing from uninstalled plugins.
-4. **`claims`** — `MEMORY.md` says "log at `~/foo.log`," disk says "no such file." Notes stay convincing for months after the path they cite is gone ([this is an open Anthropic bug](https://github.com/anthropics/claude-code/issues/26757)).
-5. **`crons`** — crontab says "fires daily," the log mtime says "not in four days."
-6. **`plugins`** — flags third-party plugin marketplaces. Claude Code plugins are a supply-chain surface; you should know whose code you're running.
+4. **`ghosts`** — a subagent says "I created the file," the JSONL says it made zero tool calls. The provably-false success in [#4462](https://github.com/anthropics/claude-code/issues/4462) (open, 37+ comments, unfixed).
+5. **`claims`** — `MEMORY.md` says "log at `~/foo.log`," disk says "no such file." Notes stay convincing for months after the path they cite is gone ([this is an open Anthropic bug](https://github.com/anthropics/claude-code/issues/26757)).
+6. **`crons`** — crontab says "fires daily," the log mtime says "not in four days."
+7. **`plugins`** — flags third-party plugin marketplaces. Claude Code plugins are a supply-chain surface; you should know whose code you're running.
 
 ## What a first run usually surfaces
 
@@ -66,19 +68,21 @@ Requires Python 3.10+. Zero dependencies.
 | `hooks` | Stop hooks configured but never fired (silent breakage detection), plus orphan fires from removed hooks | any Stop hook never fired in window |
 | `claims` | Paths cited in MEMORY.md tree that no longer exist | any missing path |
 | `crons` | Cron jobs whose log file hasn't been touched recently | any stale or missing |
+| `ghosts` | Subagents that claimed a side-effect (file write, test run, commit) but made zero tool calls | any ghost found |
 | `plugins` | Plugin marketplaces + per-plugin metadata; flags third-party marketplaces | any third-party marketplace |
-| `health` | One-screen summary across `dead`, `policy`, `hooks`, `claims`, `crons`, `plugins` — designed for daily-digest cron use | any constituent check fails |
+| `health` | One-screen summary across `dead`, `policy`, `hooks`, `ghosts`, `claims`, `crons`, `plugins` — designed for daily-digest cron use | any constituent check fails |
 | `top` | Top tools by raw invocation count | never |
 | `skills` | Per-skill usage table | never |
 | `mcps` | Per-MCP usage table (local + plugin + ghost connectors) | never |
 | `agents` | Per-subagent dispatch count | never |
 | `project` | Activity attributed to the project (`cwd`) each session ran in — sessions, tool calls, top tools/skills | never |
+| `ghosts` | Subagents that claimed a side-effect (file write, test run, commit) but made zero tool calls | any ghost found |
 
 ## Common flags
 
 - `--days N` — restrict to sessions modified in last N days. Omit for all-time.
 - `--show N` — max rows per section (default 15, `0` = none).
-- `--json` — machine-readable output (currently `dead`, `policy`, `hooks`, `claims`, `crons`, `plugins`, `project`, `health`). Pipes into `jq`.
+- `--json` — machine-readable output (currently `dead`, `policy`, `hooks`, `ghosts`, `claims`, `crons`, `plugins`, `project`, `health`). Pipes into `jq`.
 - `--logs PATH` — point at a different log root if you keep your `~/.claude/` elsewhere.
 
 ## Project (where your time actually went)
@@ -188,6 +192,33 @@ Three signals, each catches a distinct failure mode:
 - **⚠ slow max-duration** — Stop hooks above 1s of `durationMs` are flagged inline. Slow Stop hooks block Claude's response cycle.
 
 **Why only Stop hooks?** Claude Code emits an explicit `hookInfos` array (per-hook command + duration) only on system records with `subtype=stop_hook_summary`. Fires of PreToolUse / PostToolUse / SessionStart / UserPromptSubmit / Notification / PostCompact are not recorded in JSONL. paleo lists them as `config-only` so you know what's registered, but cannot verify they fired.
+
+## Ghosts (subagents that lied about doing work)
+
+[anthropics/claude-code#4462](https://github.com/anthropics/claude-code/issues/4462) is open, has 37+ comments, and is still unfixed: sub-agents report success, burn tokens, and never persist anything to disk. People in that thread describe burning through session limits only to find empty output folders and a `tasks.md` edited to *claim* the work was done. One commenter: *"we can ask Claude 100 times to verify it persisted to disk, and it will lie 100 times."*
+
+In-loop self-verification fails because the model lies about its own writes. An out-of-band check that reads the artifacts directly is the only thing you can trust — which is exactly paleo's shape.
+
+```bash
+paleo ghosts                    # exits 1 if any ghost found
+paleo --days 1 ghosts           # just today's runs (good in a Stop hook)
+paleo ghosts --min-tokens 5000  # raise the floor
+```
+
+```
+GHOSTS · 2 subagent run(s) claimed a side-effect with 0 tool calls · 27,500 tokens burned (≥1,000 floor)
+
+     21,300 tokens · gsd-executor  (2026-05-22T10:15:49)
+             claimed: "created the integration tests in tests/auth.test.ts"  — but made 0 tool calls
+             session: 5ce5c116-....jsonl
+      6,200 tokens · general-purpose  (2026-05-22T11:02:13)
+             claimed: "ran the test suite"  — but made 0 tool calls
+             session: a1b2c3d4-....jsonl
+```
+
+A ghost is a subagent whose `toolUseResult` shows `status: completed` and `totalToolUseCount: 0`, **but whose return text asserts a side-effect** — "created the file," "ran the tests," "committed the changes." With zero tool calls, that assertion is provably false: nothing happened. paleo prints the matched claim so each finding justifies itself.
+
+The action-claim gate is what makes this precise. A research or writing agent that legitimately returns prose with zero tool calls (e.g. "here are the three drafts you asked for") makes no side-effect claim and is **not** flagged — verified against a real workspace where the naive "zero tool calls" heuristic false-positived on a content-generation agent. paleo errs toward precision: it would rather miss a phantom than cry wolf on an agent that did its job. Detection is heuristic (it reads the claim, not the disk), so treat findings as "look here," not "proven."
 
 ## Crons (silent failure detection)
 

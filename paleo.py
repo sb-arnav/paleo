@@ -1421,6 +1421,148 @@ def cmd_project(args: argparse.Namespace, _usage: Usage) -> int:
     return 0
 
 
+# ----- ghosts: subagents that claimed success but did nothing ----------------
+
+
+# An agent's tool_result carries a `toolUseResult` dict with status,
+# totalToolUseCount, totalTokens, agentType, and the agent's return `content`.
+# A "ghost" is a sub-agent that reported done (status completed/success) while
+# making ZERO tool calls — yet whose return text CLAIMS it performed a
+# side-effect (wrote a file, ran tests, committed). That claim is provably
+# false: with zero tool calls, nothing was persisted. This is the failure in
+# anthropics/claude-code#4462 ("sub-agents claim successful file creation but
+# files don't persist").
+#
+# The action-claim gate is what keeps this precise. Without it, every
+# legitimate prose/research/analysis agent — which correctly returns text with
+# zero tool calls — would be flagged. We only flag agents that asserted a
+# side-effect they could not have performed. High precision over recall: better
+# to miss a phantom than cry wolf on an agent that did its job.
+GHOST_OK_STATUSES = {"completed", "success"}
+GHOST_MIN_TOKENS_DEFAULT = 1000
+
+# Side-effect claims: a verb of persistence/execution tied to a file, path,
+# test, or commit. Tuned for precision — "wrote three LinkedIn posts" does NOT
+# match (no file/path/test object); "wrote the tests to auth.test.ts" does.
+ACTION_CLAIM_RE = re.compile(
+    r"(?i)\b(?:"
+    r"(?:created|wrote|written|saved|added|implemented|generated|updated|modified|edited)\b"
+    r"[^.\n]{0,50}?\b(?:file|files|tests?|to\s+disk|[\w./-]+\.(?:py|md|ts|tsx|js|jsx|json|txt|ya?ml|toml|rs|go|sh|sql))"
+    r"|(?:ran|executed)\b[^.\n]{0,40}?\b(?:tests?|the\s+command|the\s+script|the\s+build|the\s+suite|migration)"
+    r"|(?:committed|pushed)\b[^.\n]{0,40}?\b(?:to\s+\w+|the\s+changes?|the\s+commit|file|branch)"
+    r")"
+)
+
+
+def _extract_return_text(tur: dict) -> str:
+    """Pull the agent's final return text out of a toolUseResult content blob."""
+    content = tur.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for c in content:
+            if isinstance(c, dict) and c.get("type") == "text":
+                parts.append(c.get("text") or "")
+        return "\n".join(parts)
+    return ""
+
+
+def collect_ghosts(
+    logs_root: pathlib.Path,
+    since_seconds: float | None,
+    min_tokens: int = GHOST_MIN_TOKENS_DEFAULT,
+) -> list[dict]:
+    """Return subagent completions that claimed a side-effect but made zero
+    tool calls — a provably false success.
+
+    Each entry: {agent_type, tokens, tool_calls, status, claim, timestamp, session}.
+    `claim` is the matched phrase, so the finding is self-justifying.
+    """
+    cutoff = time.time() - since_seconds if since_seconds else None
+    ghosts: list[dict] = []
+    for jsonl in _iter_session_jsonl(logs_root):
+        try:
+            mtime = jsonl.stat().st_mtime
+        except OSError:
+            continue
+        if cutoff is not None and mtime < cutoff:
+            continue
+        try:
+            with jsonl.open() as fh:
+                for line in fh:
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    tur = rec.get("toolUseResult")
+                    if not isinstance(tur, dict):
+                        continue
+                    if "totalToolUseCount" not in tur:
+                        continue
+                    status = str(tur.get("status") or "").lower()
+                    if status not in GHOST_OK_STATUSES:
+                        continue
+                    if tur.get("totalToolUseCount") != 0:
+                        continue
+                    tokens = int(tur.get("totalTokens") or 0)
+                    if tokens < min_tokens:
+                        continue
+                    text = _extract_return_text(tur)
+                    m = ACTION_CLAIM_RE.search(text)
+                    if not m:
+                        continue  # returned text but claimed no side-effect — legit
+                    claim = " ".join(m.group(0).split())[:80]
+                    ghosts.append({
+                        "agent_type": tur.get("agentType") or "?",
+                        "tokens": tokens,
+                        "tool_calls": 0,
+                        "status": status,
+                        "claim": claim,
+                        "timestamp": rec.get("timestamp") or (rec.get("message") or {}).get("timestamp"),
+                        "session": jsonl.name,
+                    })
+        except OSError:
+            continue
+    return ghosts
+
+
+def cmd_ghosts(args: argparse.Namespace, _usage: Usage) -> int:
+    logs_root = pathlib.Path(args.logs).expanduser()
+    since = args.days * 86400 if args.days else None
+    min_tokens = getattr(args, "min_tokens", GHOST_MIN_TOKENS_DEFAULT)
+    ghosts = collect_ghosts(logs_root, since, min_tokens)
+
+    if args.json:
+        json.dump({"ghosts": ghosts, "min_tokens": min_tokens}, sys.stdout, indent=2, default=str)
+        print()
+        return 1 if ghosts else 0
+
+    _print_header(_usage, args.days)
+    wasted = sum(g["tokens"] for g in ghosts)
+    print(f"GHOSTS · {len(ghosts)} subagent run(s) claimed a side-effect with 0 tool calls "
+          f"· {wasted:,} tokens burned (≥{min_tokens:,} floor)")
+    print()
+
+    if not ghosts:
+        print("✓ no ghost subagents — no completed agent claimed work it never did.")
+        return 0
+
+    shown = sorted(ghosts, key=lambda g: -g["tokens"])[: args.show] if args.show > 0 else ghosts
+    for g in shown:
+        ts = g["timestamp"][:19] if g["timestamp"] else "?"
+        print(f"  {g['tokens']:>9,} tokens · {g['agent_type']}  ({ts})")
+        print(f"             claimed: \"{g['claim']}\"  — but made 0 tool calls")
+        print(f"             session: {g['session']}")
+    if len(ghosts) > len(shown):
+        print(f"  ... and {len(ghosts) - len(shown)} more (raise --show)")
+    print()
+    print(f"✗ {len(ghosts)} subagent run(s) asserted a file write / test run / commit "
+          "but made zero tool calls — the claim is false and nothing was persisted. "
+          "See anthropics/claude-code#4462.")
+    return 1
+
+
 # ----- health: one-screen summary across all checks --------------------------
 
 
@@ -1497,6 +1639,11 @@ def cmd_health(args: argparse.Namespace, usage: Usage) -> int:
     hooks_orphan = sum(1 for cmd in hook_fires if cmd not in hook_configured_cmds)
     hooks_observable = sum(1 for h in hooks_configured if h["event"] in HOOK_EVENTS_OBSERVABLE)
 
+    # ghosts
+    ghosts = collect_ghosts(logs_root, since)
+    ghosts_count = len(ghosts)
+    ghosts_tokens = sum(g["tokens"] for g in ghosts)
+
     # plugins
     marketplaces = _load_json(KNOWN_MARKETPLACES_FILE)
     third_party = sum(
@@ -1517,6 +1664,7 @@ def cmd_health(args: argparse.Namespace, usage: Usage) -> int:
             "observable": hooks_observable,
             "total": len(hooks_configured),
         },
+        "ghosts": {"count": ghosts_count, "tokens": ghosts_tokens},
         "plugins": {"third_party_marketplaces": third_party, "total": len(marketplaces)},
     }
 
@@ -1525,6 +1673,7 @@ def cmd_health(args: argparse.Namespace, usage: Usage) -> int:
         or claims_missing > 0
         or crons_problems > 0
         or hooks_never_fired > 0
+        or ghosts_count > 0
         or third_party > 0
     )
 
@@ -1566,6 +1715,14 @@ def cmd_health(args: argparse.Namespace, usage: Usage) -> int:
         (
             f"{hooks_never_fired} of {hooks_observable} Stop hooks never fired"
             + (f", {hooks_orphan} orphan" if hooks_orphan else "")
+        ),
+    )
+    line(
+        "ghosts",
+        ghosts_count == 0,
+        (
+            f"{ghosts_count} subagent runs did nothing"
+            + (f" ({ghosts_tokens:,} tokens burned)" if ghosts_count else "")
         ),
     )
     line(
@@ -1649,6 +1806,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("mcps", "MCP usage table"),
         ("agents", "Subagent usage table"),
         ("project", "Attribute session activity to the project (cwd) it ran in"),
+        ("ghosts", "Detect subagents that reported success but made zero tool calls"),
         ("policy", "Detect tool invocations that violate hard-block policies"),
         ("hooks", "Detect Stop-hook silent breakage (configured but never fired)"),
         ("claims", "Fact-check paths referenced in your MEMORY.md tree against disk"),
@@ -1659,6 +1817,17 @@ def build_parser() -> argparse.ArgumentParser:
         sp = sub.add_parser(name, help=helptext)
         if name == "skills":
             sp.add_argument("--used-only", action="store_true")
+        if name == "ghosts":
+            sp.add_argument(
+                "--min-tokens",
+                type=int,
+                default=GHOST_MIN_TOKENS_DEFAULT,
+                help=(
+                    f"Only flag zero-tool-call agents that burned at least this "
+                    f"many tokens (default {GHOST_MIN_TOKENS_DEFAULT}). Excludes "
+                    "async-launch artifacts and instant no-ops."
+                ),
+            )
         if name == "crons":
             sp.add_argument(
                 "--slack-hours",
@@ -1707,6 +1876,7 @@ def main(argv: list[str] | None = None) -> int:
         "mcps": cmd_mcps,
         "agents": cmd_agents,
         "project": cmd_project,
+        "ghosts": cmd_ghosts,
         "policy": cmd_policy,
         "hooks": cmd_hooks,
         "claims": cmd_claims,

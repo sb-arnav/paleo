@@ -431,6 +431,86 @@ class TestProjectAttribution(unittest.TestCase):
             self.assertEqual(projects, {})
 
 
+class TestGhosts(unittest.TestCase):
+    def _write_agent_result(self, root, *, status, tool_count, tokens, content):
+        """Write a one-line JSONL session with a single Agent toolUseResult."""
+        session = root / f"s_{abs(hash((status, tool_count, tokens, content)))}.jsonl"
+        rec = {
+            "timestamp": "2026-05-22T10:00:00Z",
+            "toolUseResult": {
+                "agentType": "general-purpose",
+                "status": status,
+                "totalToolUseCount": tool_count,
+                "totalTokens": tokens,
+                "content": [{"type": "text", "text": content}],
+            },
+        }
+        session.write_text(json.dumps(rec) + "\n")
+        return session
+
+    def test_phantom_with_action_claim_is_flagged(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            self._write_agent_result(
+                root, status="completed", tool_count=0, tokens=21300,
+                content="I've created the integration tests in tests/auth.test.ts.",
+            )
+            ghosts = paleo.collect_ghosts(root, None)
+            self.assertEqual(len(ghosts), 1)
+            self.assertEqual(ghosts[0]["tool_calls"], 0)
+            self.assertIn("created", ghosts[0]["claim"])
+
+    def test_prose_agent_with_zero_tools_is_not_flagged(self):
+        """The key false-positive guard: a content agent that legitimately
+        returns text with zero tool calls must NOT be flagged."""
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            self._write_agent_result(
+                root, status="completed", tool_count=0, tokens=34000,
+                content="**1. LinkedIn Post**\nMost startups don't fail at hiring...",
+            )
+            self.assertEqual(paleo.collect_ghosts(root, None), [])
+
+    def test_zero_tokens_excluded(self):
+        """Async-launch artifacts (0 tool calls, 0 tokens) are not ghosts."""
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            self._write_agent_result(
+                root, status="completed", tool_count=0, tokens=0,
+                content="I created the file foo.py.",
+            )
+            self.assertEqual(paleo.collect_ghosts(root, None), [])
+
+    def test_agent_that_used_tools_is_not_a_ghost(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            self._write_agent_result(
+                root, status="completed", tool_count=12, tokens=50000,
+                content="I created the file foo.py.",
+            )
+            self.assertEqual(paleo.collect_ghosts(root, None), [])
+
+    def test_min_tokens_floor_respected(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            self._write_agent_result(
+                root, status="completed", tool_count=0, tokens=500,
+                content="I wrote the config to settings.json.",
+            )
+            self.assertEqual(paleo.collect_ghosts(root, None, min_tokens=1000), [])
+            self.assertEqual(len(paleo.collect_ghosts(root, None, min_tokens=100)), 1)
+
+    def test_failed_agent_not_a_ghost(self):
+        """An agent that reported failure isn't lying — not a ghost."""
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            self._write_agent_result(
+                root, status="error", tool_count=0, tokens=21300,
+                content="I tried to create the file but hit an error.",
+            )
+            self.assertEqual(paleo.collect_ghosts(root, None), [])
+
+
 class TestHealthSummary(unittest.TestCase):
     def test_crons_summary_row_shape(self):
         rows = paleo._crons_summary()

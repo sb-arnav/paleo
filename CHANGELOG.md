@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.11 — 2026-05-22
+
+- New: `paleo ghosts` — detects sub-agents that reported `status: completed` with `totalToolUseCount: 0` **and** whose return text asserts a side-effect ("created the file," "ran the tests," "committed"). With zero tool calls that claim is provably false: nothing was persisted. This is the open, unfixed failure in [anthropics/claude-code#4462](https://github.com/anthropics/claude-code/issues/4462) (37+ comments). Prints the matched claim so each finding justifies itself. Exits 1 on any ghost; wired into `health`; supports `--json` and `--min-tokens`.
+- The action-claim gate is the whole design. An early version flagged any zero-tool-call completion — and immediately false-positived on a real content-generation agent (asked to "write three short pieces," it correctly returned prose with no tool calls). Flagging that would have made paleo itself a claim-vs-reality failure. The gate flips the rule to: only flag agents that *asserted* a side-effect they couldn't have performed. High precision over recall — paleo would rather miss a phantom than cry wolf.
+- Detection is heuristic (reads the claim, not the disk). Findings mean "look here," not "proven."
+- 6 new tests (44 total): phantom-with-claim flagged, prose agent NOT flagged (the false-positive guard), zero-token exclusion, tool-using agent excluded, `--min-tokens` floor, failed-agent exclusion.
+
 ## v0.10 — 2026-05-22
 
 - New: `paleo project` — attributes each session to the project directory it ran in (dominant `cwd`) and aggregates session count, tool calls, and top tools/skills per project. Answers "which project is eating my Claude Code time" and "which skills fire where," so a workspace-global `dead` finding can be checked against the project it would have fired in. Informational; never exits non-zero. Supports `--json`.
