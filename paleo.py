@@ -1497,7 +1497,8 @@ def _crons_summary() -> list[dict]:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="paleo",
-        description="Agent workspace archeology — surface dead capabilities.",
+        description="Agent workspace archeology — the diff between what your "
+        "Claude Code workspace claims and what your sessions show.",
     )
     p.add_argument(
         "--logs",
@@ -1534,7 +1535,7 @@ def build_parser() -> argparse.ArgumentParser:
         ("claims", "Fact-check paths referenced in your MEMORY.md tree against disk"),
         ("crons", "Surface silent cron failures (logs that stopped updating)"),
         ("plugins", "Audit installed plugin marketplaces — owner, age, supply-chain risk"),
-        ("health", "One-screen summary across dead/policy/claims/crons/plugins"),
+        ("health", "One-screen summary across dead/policy/hooks/claims/crons/plugins"),
     ]:
         sp = sub.add_parser(name, help=helptext)
         if name == "skills":

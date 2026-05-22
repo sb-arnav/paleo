@@ -4,52 +4,49 @@
 [![MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org)
 
-> Agent workspace archeology. Surfaces silent decay in long-lived Claude Code workspaces.
+> Agent workspace archeology. The diff between what your Claude Code workspace claims is true and what your sessions actually show.
 
-`paleo` reads your `~/.claude/projects/*/*.jsonl` session logs (and your crontab, and your `MEMORY.md`) and tells you four things you don't currently know:
+You have 248 skills installed. You used 10 this month. Your `MEMORY.md` points at a log file you deleted in March. One of your hard-block hooks stopped firing two weeks ago and nothing told you. A cron has been silently dead since the last reboot.
 
-1. **Which skills, MCP servers, and subagents are installed but never invoked.** Most Claude Code power-user workspaces accumulate hundreds of capabilities; without telemetry you can't tell what's load-bearing and what's fossil.
-2. **Which tool calls violate your hard-block rules.** If you've decided "never call `mcp__claude_ai_*`" — has anything called it anyway? Were the attempts actually blocked, or did they succeed?
-3. **Which paths cited in your `MEMORY.md` no longer exist on disk.** Notes age silently; "the log lives at `~/.claude/foo.log`" stays convincing for months after `foo.log` was deleted.
-4. **Which of your crons silently stopped firing.** Logs that should have been touched today and weren't.
+None of this shows up anywhere. Claude Code has no dashboard for workspace decay, and the data that would reveal it — your session JSONL, your settings, your crontab — is exactly the data nobody reads.
 
-No network. No mutation. Stdlib only. Reads from `~/.claude/`.
-
-## What you might find
-
-Real numbers from a long-lived power-user workspace:
+`paleo` reads it. One command:
 
 ```
-$ paleo --days 30 dead
-SKILLS   installed=248  used=10   dead=238
-MCPs     installed=14   used=0    dead-local=14
-AGENTS   installed=73   used=13   dead=60
+$ paleo health
+WORKSPACE HEALTH
 
-$ paleo --days 30 policy
-[BLOCK] shared-account-mcp — 8 attempted · 3 blocked · 5 succeeded
-   timespan: 2026-05-12T14:53Z  →  2026-05-18T18:55Z
-✗ 5 BLOCK-severity attempt(s) succeeded — check whether the timespan
-  predates your hook install. Exit 1.
+  [✓] dead       238 skills · 60 agents · 14 mcps never invoked
+  [✓] policy     2 attempts, 0 succeeded (all blocked)
+  [✓] hooks      0 of 4 Stop hooks never fired, 1 orphan
+  [✗] claims     2 missing of 80 paths checked in MEMORY.md
+  [✗] crons      2 of 10 jobs need attention
+  [✗] plugins    1 third-party of 2 marketplaces
 
-$ paleo claims
-[MISSING] some-old-feedback.md
-  /home/me/old-build-dir/                  not found on disk
-  ~/dreaming/logs/cron-thing.log           not found on disk
-3 missing (of 78 total)
-
-$ paleo crons
-[STALE]       0 21 * * *   /usr/bin/python3 ~/scripts/daily-job-a.py   log 58h old
-[STALE]       5 21 * * *   /usr/bin/python3 ~/scripts/daily-job-b.py   log 58h old
-[MISSING-LOG] 30 22 * * *  /usr/bin/python3 ~/scripts/never-fired.py
-[MISSING-LOG]  0  0 * * 1  /usr/bin/python3 ~/scripts/weekly-thing.py
-8 cron(s) need attention.
+Run the individual subcommand for details on any failing line.
 ```
 
-A first run on a workspace that's been in heavy use for months typically surfaces:
-- A high percentage of installed skills never invoked (the long tail of plugin installs).
+Exit code is non-zero when anything's wrong, so `paleo health` drops straight into a daily-digest cron or a CI gate. No network. No mutation. Stdlib only. Reads from `~/.claude/`.
+
+## The six things it checks
+
+Each subcommand surfaces one place where your workspace's claim diverges from what actually happened:
+
+1. **`dead`** — config says "248 skills installed," sessions say "you used 10." Most power-user workspaces accumulate hundreds of skills/MCPs/subagents; without telemetry you can't tell load-bearing from fossil.
+2. **`policy`** — your hook says "blocked," the JSONL says "succeeded." If you decided "never call `mcp__claude_ai_*`," has anything called it anyway — and did the call actually get stopped?
+3. **`hooks`** — `settings.json` says "installed," the JSONL says "never fired." Catches Stop hooks that broke silently (the failure mode in [#16047](https://github.com/anthropics/claude-code/issues/16047) / [#2891](https://github.com/anthropics/claude-code/issues/2891)) plus orphan hooks still firing from uninstalled plugins.
+4. **`claims`** — `MEMORY.md` says "log at `~/foo.log`," disk says "no such file." Notes stay convincing for months after the path they cite is gone ([this is an open Anthropic bug](https://github.com/anthropics/claude-code/issues/26757)).
+5. **`crons`** — crontab says "fires daily," the log mtime says "not in four days."
+6. **`plugins`** — flags third-party plugin marketplaces. Claude Code plugins are a supply-chain surface; you should know whose code you're running.
+
+## What a first run usually surfaces
+
+On a workspace that's been in heavy use for months:
+- A high percentage of installed skills never invoked — the long tail of plugin installs.
 - Several memory notes pointing at paths that no longer exist.
-- At least one cron whose log file hasn't been touched in days — most often because the host machine was shut down for a while, but sometimes because the script has been broken since install.
-- Plus, the contrast between **attempted** and **succeeded** policy violations: a hard-block hook that's working will block attempts but they still appear in JSONL.
+- At least one cron whose log hasn't moved in days — sometimes because the host was off, sometimes because the script has been broken since install.
+- An orphan hook or two: still firing in your sessions, but no longer in any config file.
+- The contrast between **attempted** and **succeeded** policy violations — a working hard-block hook blocks attempts, but they still appear in JSONL, so you can prove the hook is doing its job.
 
 ## Install
 
@@ -80,7 +77,7 @@ Requires Python 3.10+. Zero dependencies.
 
 - `--days N` — restrict to sessions modified in last N days. Omit for all-time.
 - `--show N` — max rows per section (default 15, `0` = none).
-- `--json` — machine-readable output (currently `dead`, `policy`, `claims`, `crons`, `plugins`, `health`). Pipes into `jq`.
+- `--json` — machine-readable output (currently `dead`, `policy`, `hooks`, `claims`, `crons`, `plugins`, `health`). Pipes into `jq`.
 - `--logs PATH` — point at a different log root if you keep your `~/.claude/` elsewhere.
 
 ## Claims (memory fact-check)
