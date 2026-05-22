@@ -59,6 +59,8 @@ ln -s ~/paleo/paleo.py ~/.local/bin/paleo   # optional
 
 Requires Python 3.10+. Zero dependencies.
 
+Then just run `paleo` — with no subcommand it runs `health`, the one-screen summary. `paleo --version` prints the version.
+
 ## Subcommands
 
 | Command | Surfaces | Exit non-zero when |

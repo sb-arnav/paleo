@@ -531,6 +531,21 @@ class TestGhosts(unittest.TestCase):
             self.assertEqual(paleo.collect_ghosts(root, None), [])
 
 
+class TestCliDefaults(unittest.TestCase):
+    def test_bare_invocation_defaults_to_health(self):
+        """`paleo` with no subcommand should parse cmd as None so main() can
+        route it to health."""
+        args = paleo.build_parser().parse_args([])
+        self.assertIsNone(args.cmd)
+
+    def test_explicit_subcommand_preserved(self):
+        args = paleo.build_parser().parse_args(["dead"])
+        self.assertEqual(args.cmd, "dead")
+
+    def test_version_string_exists(self):
+        self.assertRegex(paleo.__version__, r"^\d+\.\d+")
+
+
 class TestHealthSummary(unittest.TestCase):
     def test_crons_summary_row_shape(self):
         rows = paleo._crons_summary()

@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.13 — 2026-05-22
+
+- Bare `paleo` (no subcommand) now runs `health` instead of erroring with a usage message — the first thing a new user types now does the most useful thing.
+- Added `--version` (and a `__version__` string in source).
+- 3 new tests (49 total): bare-invocation default, explicit-subcommand preserved, version string present.
+
 ## v0.12 — 2026-05-22
 
 - `paleo project` now rolls agent worktrees (`<project>/.claude/worktrees/agent-<hash>`) up to their parent project. These are isolated sub-agent execution sandboxes, not projects — before this, each one showed as its own one-session "project," fragmenting the view and hiding that the work belonged to the parent. On the dev workspace this collapsed 8 phantom entries and reclaimed their sessions into the parent projects that spawned them.

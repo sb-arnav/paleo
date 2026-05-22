@@ -20,6 +20,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Iterable
 
+__version__ = "0.13"
+
 HOME = pathlib.Path.home()
 CLAUDE = HOME / ".claude"
 PROJECTS_DIR = CLAUDE / "projects"
@@ -1809,8 +1811,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit machine-readable JSON instead of the human report.",
     )
+    p.add_argument(
+        "--version",
+        action="version",
+        version=f"paleo {__version__}",
+    )
 
-    sub = p.add_subparsers(dest="cmd", required=True)
+    # Subcommand is optional — bare `paleo` runs `health`, the hero check.
+    sub = p.add_subparsers(dest="cmd", required=False)
     for name, helptext in [
         ("dead", "Dead-capability map (skills+mcps+agents)"),
         ("top", "Top-used tools by raw count"),
@@ -1878,6 +1886,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if not getattr(args, "cmd", None):
+        args.cmd = "health"  # bare `paleo` runs the hero check
     logs_root = pathlib.Path(args.logs).expanduser()
     since = args.days * 86400 if args.days else None
     usage = collect_usage(logs_root, since)
