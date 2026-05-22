@@ -531,6 +531,62 @@ class TestGhosts(unittest.TestCase):
             self.assertEqual(paleo.collect_ghosts(root, None), [])
 
 
+class TestMalformedInputDefensive(unittest.TestCase):
+    """paleo's contract is to never crash on malformed input. These feed
+    pathological-but-valid-JSON records to every collector and assert no raise."""
+
+    def _write(self, root, name, lines):
+        (root / name).write_text("\n".join(lines) + "\n")
+
+    def test_non_dict_jsonl_lines_do_not_crash_collectors(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            # valid JSON, but not objects: array, string, int, bool, null
+            self._write(root, "x.jsonl", ['["a","b"]', '"bare"', "42", "true", "null"])
+            # every collector must tolerate these
+            self.assertEqual(paleo.collect_usage(root, None).sessions_seen, 1)
+            self.assertEqual(paleo.collect_ghosts(root, None), [])
+            self.assertEqual(paleo.collect_projects(root, None), {})
+            self.assertEqual(paleo.collect_hook_fires(root, None), {})
+            hits, _ = paleo.collect_policy_hits(root, None, paleo.DEFAULT_POLICIES)
+            self.assertTrue(all(v == [] for v in hits.values()))
+
+    def test_non_numeric_tokens_does_not_crash_ghosts(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            self._write(root, "g.jsonl", [json.dumps({
+                "toolUseResult": {
+                    "status": "completed", "totalToolUseCount": 0,
+                    "totalTokens": "not-a-number",
+                    "content": "I created foo.py", "agentType": "x",
+                },
+            })])
+            # malformed tokens → treated as 0 → below floor → not flagged, no raise
+            self.assertEqual(paleo.collect_ghosts(root, None), [])
+
+    def test_non_numeric_duration_does_not_crash_hook_fires(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            self._write(root, "h.jsonl", [json.dumps({
+                "type": "system", "subtype": "stop_hook_summary",
+                "timestamp": "2026-05-22T00:00:00Z",
+                "hookInfos": [{"command": "bash x.sh", "durationMs": "bad"}],
+            })])
+            fires = paleo.collect_hook_fires(root, None)
+            self.assertEqual(fires["bash x.sh"]["fires"], 1)
+            self.assertEqual(fires["bash x.sh"]["max_ms"], 0)  # bad duration → 0
+
+    def test_non_string_cwd_does_not_crash_projects(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            self._write(root, "p.jsonl", [json.dumps({
+                "cwd": 12345,
+                "message": {"content": [{"type": "tool_use", "name": "Bash"}]},
+            })])
+            # non-string cwd is ignored, not crashed on
+            self.assertEqual(paleo.collect_projects(root, None), {})
+
+
 class TestCliDefaults(unittest.TestCase):
     def test_bare_invocation_defaults_to_health(self):
         """`paleo` with no subcommand should parse cmd as None so main() can

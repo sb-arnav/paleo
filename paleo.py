@@ -20,7 +20,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Iterable
 
-__version__ = "0.13"
+__version__ = "0.13.1"
 
 HOME = pathlib.Path.home()
 CLAUDE = HOME / ".claude"
@@ -176,6 +176,8 @@ def collect_usage(
                     try:
                         rec = json.loads(line)
                     except json.JSONDecodeError:
+                        continue
+                    if not isinstance(rec, dict):
                         continue
                     _ingest_record(rec, usage)
         except OSError:
@@ -493,6 +495,8 @@ def collect_policy_hits(
                     try:
                         rec = json.loads(line)
                     except json.JSONDecodeError:
+                        continue
+                    if not isinstance(rec, dict):
                         continue
                     msg = rec.get("message")
                     if not isinstance(msg, dict):
@@ -980,6 +984,8 @@ def collect_hook_fires(
                         rec = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    if not isinstance(rec, dict):
+                        continue
                     if rec.get("type") != "system":
                         continue
                     if rec.get("subtype") != "stop_hook_summary":
@@ -994,7 +1000,10 @@ def collect_hook_fires(
                         cmd = h.get("command")
                         if not cmd:
                             continue
-                        dur = int(h.get("durationMs") or 0)
+                        try:
+                            dur = int(h.get("durationMs") or 0)
+                        except (ValueError, TypeError):
+                            dur = 0
                         s = stats.setdefault(cmd, {
                             "fires": 0, "last_ts": None, "total_ms": 0, "max_ms": 0,
                         })
@@ -1353,8 +1362,10 @@ def collect_projects(
                         rec = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    if not isinstance(rec, dict):
+                        continue
                     cwd = rec.get("cwd")
-                    if cwd:
+                    if isinstance(cwd, str) and cwd:
                         cwd_counts[_normalize_project_cwd(cwd)] += 1
                     msg = rec.get("message")
                     if not isinstance(msg, dict):
@@ -1509,6 +1520,8 @@ def collect_ghosts(
                         rec = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    if not isinstance(rec, dict):
+                        continue
                     tur = rec.get("toolUseResult")
                     if not isinstance(tur, dict):
                         continue
@@ -1519,7 +1532,10 @@ def collect_ghosts(
                         continue
                     if tur.get("totalToolUseCount") != 0:
                         continue
-                    tokens = int(tur.get("totalTokens") or 0)
+                    try:
+                        tokens = int(tur.get("totalTokens") or 0)
+                    except (ValueError, TypeError):
+                        tokens = 0
                     if tokens < min_tokens:
                         continue
                     text = _extract_return_text(tur)

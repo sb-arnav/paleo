@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.13.1 — 2026-05-22
+
+Defensive hardening. paleo's contract is to never crash on malformed input; an adversarial audit found three places it did. None affect well-formed Claude Code logs — every command runs clean on real data — but a corrupt or partially-written JSONL line could trip them.
+
+- **Non-dict JSONL line** (a line that is valid JSON but an array/string/number/bool/null) crashed every collector via `rec.get(...)`, and since `collect_usage` runs before dispatch, it took down all subcommands. Added `isinstance(rec, dict)` guards to all five collectors.
+- **Non-numeric `totalTokens` / `durationMs`** raised `ValueError` from `int(x or 0)` (the `or 0` only catches falsy values). Wrapped both conversions in `try/except`.
+- **Non-string `cwd`** raised `TypeError` in the worktree-normalization regex. Now guarded with `isinstance(cwd, str)`.
+- 4 regression tests (53 total) feeding each pathological input to the collectors and asserting no raise.
+
 ## v0.13 — 2026-05-22
 
 - Bare `paleo` (no subcommand) now runs `health` instead of erroring with a usage message — the first thing a new user types now does the most useful thing.
